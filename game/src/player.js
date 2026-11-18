@@ -37,7 +37,7 @@ export function createPlayer(G) {
     health: 100, maxHealth: 100,
     weapon: 'fists',           // 'fists' | 'pistol'
     ammo: 12, maxAmmo: 24,
-    punchCooldown: 0, shootCooldown: 0,
+    punchCooldown: 0, shootCooldown: 0, punchAnim: 0,
     car: null,                 // car the player is driving, or null
     speed: 0, walkPhase: 0,
     invuln: 0,
@@ -81,6 +81,8 @@ function footMove(G, dt) {
   const swing = p.speed > 0 ? Math.sin(p.walkPhase) * 0.55 : 0;
   p.legL.rotation.x = swing; p.legR.rotation.x = -swing;
   p.armL.rotation.x = -swing * 0.8; p.armR.rotation.x = swing * 0.8;
+  // a punch swing overrides the walk cycle while it plays
+  if (p.punchAnim > 0) { p.armR.rotation.x = -1.4; p.armL.rotation.x = 0.4; }
   p.mesh.position.copy(p.pos);
   p.mesh.rotation.y = p.heading;
   p.gun.visible = p.weapon === 'pistol';
@@ -102,6 +104,9 @@ function updateCamera(G, dt) {
     const cx = target.x + Math.sin(back) * dist;
     const cz = target.z + Math.cos(back) * dist;
     const want = new THREE.Vector3(cx, height, cz);
+    // keep the camera out of buildings (e.g. after a Continue spawn)
+    const clipped = collideCircle(G, want.x, want.z, 1.0);
+    want.x = clipped.x; want.z = clipped.z;
     cam.position.lerp(want, Math.min(1, dt * 5));
     cam.lookAt(target.x, target.y, target.z);
   } else {
@@ -112,6 +117,9 @@ function updateCamera(G, dt) {
     const cz = target.z + Math.cos(G.cameraYaw) * Math.cos(cy) * dist;
     const cyy = target.y + Math.sin(cy) * dist + 1.2;
     const want = new THREE.Vector3(cx, cyy, cz);
+    // keep the camera out of buildings (e.g. after a Continue spawn)
+    const clipped = collideCircle(G, want.x, want.z, 1.0);
+    want.x = clipped.x; want.z = clipped.z;
     cam.position.lerp(want, Math.min(1, dt * 10));
     cam.lookAt(target);
   }
@@ -133,6 +141,7 @@ export function updatePlayer(G, dt) {
   if (!p) return;
   p.punchCooldown = Math.max(0, p.punchCooldown - dt);
   p.shootCooldown = Math.max(0, p.shootCooldown - dt);
+  p.punchAnim = Math.max(0, (p.punchAnim || 0) - dt);
   p.invuln = Math.max(0, p.invuln - dt);
   if (p.car) {
     // player rides in the car; mesh hidden inside

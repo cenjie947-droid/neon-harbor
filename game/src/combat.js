@@ -24,25 +24,30 @@ export class Combat {
     const p = G.player;
     if (p.punchCooldown > 0) return;
     p.punchCooldown = 0.35;
+    p.punchAnim = 0.22; // visible swing — applied in footMove, which owns the arms
     G.audio.punch();
+    G.fx.shake(0.12);
     const fx = Math.sin(p.heading), fz = Math.cos(p.heading);
     const targets = [];
     for (const e of G.enemies) targets.push({ obj: e, d: dist2D(p.pos.x, p.pos.z, e.pos.x, e.pos.z), hp: 'enemy' });
     for (const off of G.officers) targets.push({ obj: off, d: dist2D(p.pos.x, p.pos.z, off.pos.x, off.pos.z), hp: 'officer' });
     for (const ped of G.peds) if (ped.state !== 'down') targets.push({ obj: ped, d: dist2D(p.pos.x, p.pos.z, ped.pos.x, ped.pos.z), hp: 'ped' });
+    let hit = false;
     for (const t of targets) {
       if (t.d < 2.4) {
         const dx = t.obj.pos.x - p.pos.x, dz = t.obj.pos.z - p.pos.z;
         const facing = (dx * fx + dz * fz) / (t.d || 1);
         if (facing > 0.3) {
           this.hitTarget(G, t.obj, t.hp, 34, new THREE.Vector3(p.pos.x, 1.4, p.pos.z));
+          hit = true;
           break;
         }
       }
     }
-    // swing animation
-    p.armR.rotation.x = -1.4;
-    setTimeout(() => { p.armR.rotation.x = 0; }, 180);
+    if (hit) {
+      G.fx.shake(0.35);
+      G.hud.showMessage('Punch landed!');
+    }
   }
 
   shoot(G) {

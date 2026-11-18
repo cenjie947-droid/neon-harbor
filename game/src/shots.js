@@ -89,7 +89,7 @@ export function stageShot(G, shot) {
     G.hud.show();
     G.missions.startMission(G, 0, false);
     G.missionIndex = 0;
-    G.cash = 450;
+    G.cash = 150; // mission 1 pays $150 and the player starts at $0
     const car = G.cars.find(c => c.parked) || G.cars[0];
     car.pos.set(G.markers.garage.x + 6, 0, G.markers.garage.z);
     car.heading = Math.PI / 2;
@@ -99,7 +99,7 @@ export function stageShot(G, shot) {
     G.player.mesh.position.copy(G.player.pos);
     document.getElementById('mission-panel-title').textContent = 'MISSION COMPLETE';
     document.getElementById('mission-panel-text').textContent = 'First Wheels — nicely driven, Cole.';
-    document.getElementById('mission-panel-reward').textContent = 'Reward: $150  •  Total cash: $450';
+    document.getElementById('mission-panel-reward').textContent = 'Reward: $150  •  Total cash: $150';
     document.getElementById('mission-panel').classList.remove('hidden');
     G.camera.position.set(G.markers.garage.x - 14, 6, G.markers.garage.z + 12);
     G.camera.lookAt(G.markers.garage.x, 1.5, G.markers.garage.z);

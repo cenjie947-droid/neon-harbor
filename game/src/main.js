@@ -29,7 +29,7 @@ function initRenderer() {
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
+  renderer.toneMappingExposure = 1.2;
   G.renderer = renderer;
   G.scene = new THREE.Scene();
   G.camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 1500);
@@ -91,7 +91,7 @@ function initInput() {
 function tryEnterExitCar() {
   const p = G.player;
   if (p.car) { exitCar(G); return; }
-  const car = nearestCar(G, p.pos, 3.6);
+  const car = nearestCar(G, p.pos, 5.0);
   if (!car) return;
   enterCar(G, car);
   G.stats.carsStolen++;
@@ -171,9 +171,14 @@ function startGame(missionIndex, useSave) {
   document.getElementById('title-screen').classList.add('hidden');
   G.hud.show();
   let startMission = missionIndex ?? 0;
+  let resumeStep = 0;
   if (useSave) {
     const data = G.save.load();
-    if (data) startMission = G.save.apply(G, data);
+    if (data) {
+      const resumed = G.save.apply(G, data);
+      startMission = resumed.index;
+      resumeStep = resumed.step;
+    }
   } else {
     G.cash = 0;
     G.player.pos.set(-60, 0, -34);
@@ -181,7 +186,7 @@ function startGame(missionIndex, useSave) {
     G.wanted = 0;
   }
   G.mode = 'playing';
-  G.missions.startMission(G, startMission, true);
+  G.missions.startMission(G, startMission, true, resumeStep);
   G.hud.showMessage('Welcome to Neon Harbor, Cole.');
 }
 
@@ -242,7 +247,7 @@ function update(dt) {
   // interact prompt
   const p = G.player;
   if (!p.car) {
-    const car = nearestCar(G, p.pos, 3.6);
+    const car = nearestCar(G, p.pos, 5.0);
     const el = document.getElementById('interact');
     if (car) { el.textContent = `Press E — steal the ${car.name}`; el.classList.remove('hidden'); }
     else el.classList.add('hidden');

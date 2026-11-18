@@ -259,7 +259,15 @@ export function nearestCar(G, pos, maxDist) {
   let best = null, bestD = maxDist;
   for (const car of G.cars) {
     if (car.isPolice && G.policeCars.includes(car)) continue;
-    const d = Math.hypot(car.pos.x - pos.x, car.pos.z - pos.z);
+    // distance to the car's oriented bounding box, not its centre, so the
+    // steal prompt also appears at the nose and tail, not just the doors
+    const dx = pos.x - car.pos.x, dz = pos.z - car.pos.z;
+    const along = dx * Math.sin(car.heading) + dz * Math.cos(car.heading);
+    const side = dx * Math.cos(car.heading) - dz * Math.sin(car.heading);
+    const halfLen = car.isVan ? 2.8 : 2.2, halfWid = 1.0;
+    const ox = Math.max(Math.abs(along) - halfLen, 0);
+    const oz = Math.max(Math.abs(side) - halfWid, 0);
+    const d = Math.hypot(ox, oz);
     if (d < bestD) { bestD = d; best = car; }
   }
   return best;

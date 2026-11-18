@@ -66,9 +66,10 @@ export class Missions {
     return m ? m.steps[this.G.missionStep] : null;
   }
 
-  startMission(G, index, showBriefing = true) {
+  startMission(G, index, showBriefing = true, startStep = 0) {
     G.missionIndex = index;
-    G.missionStep = 0;
+    const steps = (MISSIONS[index] && MISSIONS[index].steps.length) || 1;
+    G.missionStep = Math.max(0, Math.min(startStep | 0, steps - 1));
     G.missionActive = true;
     G.missionDone = false;
     G.missionTimer = 0;

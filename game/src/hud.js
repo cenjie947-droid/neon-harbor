@@ -148,11 +148,14 @@ export class HUD {
     for (const off of G.officers) dot(off.pos.x, off.pos.z, 2.5, '#ff8888');
     for (const ped of G.peds) dot(ped.pos.x, ped.pos.z, 1.8, '#7dff9e');
     for (const e of G.enemies) dot(e.pos.x, e.pos.z, 3, '#ff2222');
-    // player arrow (north-up, rotates with heading)
+    // player arrow (north-up, rotates with heading). Heading is
+    // atan2(fx, fz): 0 faces +z (south, map down), PI faces -z (north, map
+    // up) — so the arrow needs PI - heading, not heading, or north reads
+    // as south.
     const heading = G.player.car ? G.player.car.heading : G.player.heading;
     ctx.save();
     ctx.translate(C, C);
-    ctx.rotate(heading);
+    ctx.rotate(Math.PI - heading);
     ctx.fillStyle = '#fff';
     ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.moveTo(0, -8); ctx.lineTo(5.5, 6); ctx.lineTo(0, 3); ctx.lineTo(-5.5, 6); ctx.closePath();

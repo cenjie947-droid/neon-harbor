@@ -1,7 +1,7 @@
 // Neon Harbor — the wanted system: stars, heat decay, police cars that
 // chase and ram, foot officers who can bust the player.
 import * as THREE from 'three';
-import { rand, pick, clamp, dist2D, angleLerp, collideCircle, inWorldBounds } from './state.js';
+import { rand, clamp, dist2D, angleLerp, collideCircle, inWorldBounds } from './state.js';
 import { createCar } from './vehicles.js';
 import { damagePlayer } from './player.js';
 
@@ -39,13 +39,19 @@ export class Police {
 
   spawnPoliceCar(G) {
     const p = G.player.pos;
-    // spawn on a road at the city edge, away from the player
-    const edge = pick([
-      { x: -210, z: rand(-180, 140) }, { x: 210, z: rand(-180, 140) },
-      { x: rand(-210, 210), z: -210 }, { x: rand(-210, 210), z: 150 },
-    ]);
+    // spawn on a nearby road so the player actually sees the response,
+    // instead of at the city edge where the car takes a minute to arrive
+    const a = rand(0, Math.PI * 2), d = rand(45, 65);
+    let x = clamp(p.x + Math.cos(a) * d, -230, 230);
+    let z = clamp(p.z + Math.sin(a) * d, -230, 190);
+    // snap to the nearest road line so the car starts on a street
+    let bestRx = G.roads.xs[0], bestRd = Infinity;
+    for (const rx of G.roads.xs) { const dd = Math.abs(x - rx); if (dd < bestRd) { bestRd = dd; bestRx = rx; } }
+    let bestRz = G.roads.zs[0], bestZd = Infinity;
+    for (const rz of G.roads.zs) { const dd = Math.abs(z - rz); if (dd < bestZd) { bestZd = dd; bestRz = rz; } }
+    if (bestRd <= bestZd) x = bestRx; else z = bestRz;
     const car = createCar(G, {
-      x: edge.x, z: edge.z, heading: 0, color: 0xf5f5f5, name: 'Harbor PD', isPolice: true,
+      x, z, heading: 0, color: 0xf5f5f5, name: 'Harbor PD', isPolice: true,
     });
     car.maxSpeed = 34;
     G.policeCars.push(car);
@@ -86,7 +92,9 @@ export class Police {
       for (const car of G.policeCars) nearest = Math.min(nearest, dist2D(car.pos.x, car.pos.z, G.player.pos.x, G.player.pos.z));
       for (const off of G.officers) nearest = Math.min(nearest, dist2D(off.pos.x, off.pos.z, G.player.pos.x, G.player.pos.z));
       const seen = nearest < 55;
-      if (!seen && G.heatTimer > 14) {
+      // heat only fades after a long stretch unseen (was 14s: stars
+      // vanished before the player ever saw a police car)
+      if (!seen && G.heatTimer > 40) {
         G.wanted = Math.max(0, G.wanted - 1);
         G.heatTimer = 0;
         if (G.wanted === 0) { this.despawnAll(G); G.hud.showMessage('You lost the cops. Heat is off.'); }
@@ -124,8 +132,12 @@ export class Police {
       const res = collideCircle(G, nx, nz, 2.1);
       if (!res.hit && inWorldBounds(res.x, res.z)) { car.pos.x = res.x; car.pos.z = res.z; }
       else { car.speed *= 0.5; }
-      // ram the player's car / player
-      if (d < 4.6) {
+      // ram the player's car / player — one hit per car per second, so a
+      // police car parked on top of the player cannot machine-gun them
+      // to death before a foot officer can make the BUSTED arrest
+      car.ramCooldown = Math.max(0, (car.ramCooldown || 0) - dt);
+      if (d < 4.6 && car.ramCooldown <= 0) {
+        car.ramCooldown = 1.0;
         if (p.car) {
           p.car.speed *= 0.7;
           car.speed *= 0.5;
