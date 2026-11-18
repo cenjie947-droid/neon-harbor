@@ -91,6 +91,33 @@ export function inWorldBounds(x, z) {
   return x > -WORLD.half + 4 && x < WORLD.half - 4 && z > -WORLD.half + 4 && z < WORLD.waterZ - 2;
 }
 
+// Does any building AABB block the 2D segment (x1,z1)-(x2,z2)? Slab-method
+// test against each collider; used for police line of sight.
+export function segmentBlocked(G, x1, z1, x2, z2) {
+  const dx = x2 - x1, dz = z2 - z1;
+  for (const c of G.colliders) {
+    let t0 = 0, t1 = 1;
+    if (Math.abs(dx) < 1e-9) {
+      if (x1 < c.minX || x1 > c.maxX) continue;
+    } else {
+      let a = (c.minX - x1) / dx, b = (c.maxX - x1) / dx;
+      if (a > b) { const t = a; a = b; b = t; }
+      t0 = Math.max(t0, a); t1 = Math.min(t1, b);
+      if (t0 > t1) continue;
+    }
+    if (Math.abs(dz) < 1e-9) {
+      if (z1 < c.minZ || z1 > c.maxZ) continue;
+    } else {
+      let a = (c.minZ - z1) / dz, b = (c.maxZ - z1) / dz;
+      if (a > b) { const t = a; a = b; b = t; }
+      t0 = Math.max(t0, a); t1 = Math.min(t1, b);
+      if (t0 > t1) continue;
+    }
+    return true;
+  }
+  return false;
+}
+
 // Is this point on a road (within half a road width of a road centre line)?
 export function onRoad(G, x, z) {
   const hw = WORLD.roadWidth / 2;

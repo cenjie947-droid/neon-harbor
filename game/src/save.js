@@ -67,18 +67,24 @@ export class SaveData {
 
   // Put the player back into the car they had when saving. Cars are
   // re-spawned fresh on load, so match the special car by identity and any
-  // other car by the nearest parked car to where it was saved.
+  // other car by the same model + colour parked nearby (the save records
+  // both); fall back to the nearest parked car, then any parked car.
   restoreCar(G, saved) {
     let car = null;
     if (saved.special) car = G.cars.find(c => c.special === saved.special);
     if (!car) {
-      let best = null, bestD = 60;
-      for (const c of G.cars) {
-        if (c.isPolice || G.policeCars.includes(c) || !c.parked) continue;
-        const d = Math.hypot(c.pos.x - saved.x, c.pos.z - saved.z);
-        if (d < bestD) { bestD = d; best = c; }
-      }
-      car = best || G.cars.find(c => c.parked && !c.isPolice);
+      const parkedNear = (match) => {
+        let best = null, bestD = 60;
+        for (const c of G.cars) {
+          if (c.isPolice || G.policeCars.includes(c) || !c.parked) continue;
+          if (match && (c.name !== saved.name || c.color !== saved.color)) continue;
+          const d = Math.hypot(c.pos.x - saved.x, c.pos.z - saved.z);
+          if (d < bestD) { bestD = d; best = c; }
+        }
+        return best;
+      };
+      car = parkedNear(true) || parkedNear(false) ||
+        G.cars.find(c => c.parked && !c.isPolice);
     }
     if (!car) return false;
     car.pos.set(saved.x, 0, saved.z);

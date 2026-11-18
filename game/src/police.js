@@ -1,7 +1,7 @@
 // Neon Harbor — the wanted system: stars, heat decay, police cars that
 // chase and ram, foot officers who can bust the player.
 import * as THREE from 'three';
-import { rand, clamp, dist2D, angleLerp, collideCircle, inWorldBounds } from './state.js';
+import { rand, clamp, dist2D, angleLerp, collideCircle, inWorldBounds, segmentBlocked } from './state.js';
 import { createCar } from './vehicles.js';
 import { damagePlayer } from './player.js';
 
@@ -40,16 +40,26 @@ export class Police {
   spawnPoliceCar(G) {
     const p = G.player.pos;
     // spawn on a nearby road so the player actually sees the response,
-    // instead of at the city edge where the car takes a minute to arrive
-    const a = rand(0, Math.PI * 2), d = rand(45, 65);
-    let x = clamp(p.x + Math.cos(a) * d, -230, 230);
-    let z = clamp(p.z + Math.sin(a) * d, -230, 190);
-    // snap to the nearest road line so the car starts on a street
-    let bestRx = G.roads.xs[0], bestRd = Infinity;
-    for (const rx of G.roads.xs) { const dd = Math.abs(x - rx); if (dd < bestRd) { bestRd = dd; bestRx = rx; } }
-    let bestRz = G.roads.zs[0], bestZd = Infinity;
-    for (const rz of G.roads.zs) { const dd = Math.abs(z - rz); if (dd < bestZd) { bestZd = dd; bestRz = rz; } }
-    if (bestRd <= bestZd) x = bestRx; else z = bestRz;
+    // instead of at the city edge where the car takes a minute to arrive.
+    // The road snap can push the point in or out, so retry angles until
+    // the snapped spot really is 45-65 m away (was: a 69 m spawn measured).
+    let best = null, bestScore = Infinity;
+    for (let i = 0; i < 12; i++) {
+      const a = rand(0, Math.PI * 2), d = rand(45, 65);
+      let x = clamp(p.x + Math.cos(a) * d, -230, 230);
+      let z = clamp(p.z + Math.sin(a) * d, -230, 190);
+      // snap to the nearest road line so the car starts on a street
+      let bestRx = G.roads.xs[0], bestRd = Infinity;
+      for (const rx of G.roads.xs) { const dd = Math.abs(x - rx); if (dd < bestRd) { bestRd = dd; bestRx = rx; } }
+      let bestRz = G.roads.zs[0], bestZd = Infinity;
+      for (const rz of G.roads.zs) { const dd = Math.abs(z - rz); if (dd < bestZd) { bestZd = dd; bestRz = rz; } }
+      if (bestRd <= bestZd) x = bestRx; else z = bestRz;
+      const dist = Math.hypot(x - p.x, z - p.z);
+      const score = dist < 45 ? 45 - dist : dist > 65 ? dist - 65 : 0;
+      if (score === 0) { best = { x, z }; break; }
+      if (score < bestScore) { bestScore = score; best = { x, z }; }
+    }
+    const { x, z } = best;
     const car = createCar(G, {
       x, z, heading: 0, color: 0xf5f5f5, name: 'Harbor PD', isPolice: true,
     });
@@ -85,13 +95,24 @@ export class Police {
   }
 
   update(G, dt) {
-    // heat decay: if no police can see the player, wanted fades
+    // heat decay: if no police can see the player, wanted fades.
+    // "Seen" needs line of sight, not just distance: police spawn 45-65 m
+    // away and drive straight at the player, so a distance-only check
+    // resets the timer forever and the 40 s decay could never fire.
+    // Hiding behind a building now breaks line of sight and lets heat fade.
     if (G.wanted > 0) {
       G.heatTimer += dt;
-      let nearest = 9999;
-      for (const car of G.policeCars) nearest = Math.min(nearest, dist2D(car.pos.x, car.pos.z, G.player.pos.x, G.player.pos.z));
-      for (const off of G.officers) nearest = Math.min(nearest, dist2D(off.pos.x, off.pos.z, G.player.pos.x, G.player.pos.z));
-      const seen = nearest < 55;
+      let nearest = 9999, nearestPos = null;
+      for (const car of G.policeCars) {
+        const d = dist2D(car.pos.x, car.pos.z, G.player.pos.x, G.player.pos.z);
+        if (d < nearest) { nearest = d; nearestPos = car.pos; }
+      }
+      for (const off of G.officers) {
+        const d = dist2D(off.pos.x, off.pos.z, G.player.pos.x, G.player.pos.z);
+        if (d < nearest) { nearest = d; nearestPos = off.pos; }
+      }
+      const seen = nearest < 55 && nearestPos &&
+        !segmentBlocked(G, G.player.pos.x, G.player.pos.z, nearestPos.x, nearestPos.z);
       // heat only fades after a long stretch unseen (was 14s: stars
       // vanished before the player ever saw a police car)
       if (!seen && G.heatTimer > 40) {
