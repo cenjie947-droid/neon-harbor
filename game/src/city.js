@@ -1,5 +1,5 @@
 // Neon Harbor — the procedural city: roads, districts, buildings, palms,
-// lamps, shop signs, the pier and the sea. Sunset lighting, fog, shadows.
+// lamps, shop signs, the pier and the sea. Bright midday light, fog, shadows.
 import * as THREE from 'three';
 import { WORLD, rand, randInt, pick, makeCanvasTexture } from './state.js';
 
@@ -26,12 +26,12 @@ export function buildCity(G) {
   G.roads.xs = [...ROAD_LINES];
   G.roads.zs = [...ROAD_LINES];
 
-  // ---- sky, fog, sun ----
-  scene.background = new THREE.Color(0x2a2f55);
-  scene.fog = new THREE.Fog(0x3a3560, 180, 620);
-  const hemi = new THREE.HemisphereLight(0xffd9a8, 0x3a4a60, 1.6);
+  // ---- sky, fog, sun: a bright midday sky, not a dusk haze ----
+  scene.background = new THREE.Color(0x7fb2e5);
+  scene.fog = new THREE.Fog(0x9fc3e8, 180, 620);
+  const hemi = new THREE.HemisphereLight(0xcfe4ff, 0x9a8a6a, 1.8);
   scene.add(hemi);
-  const sun = new THREE.DirectionalLight(0xffb36b, 2.6);
+  const sun = new THREE.DirectionalLight(0xfff2d0, 2.6);
   sun.position.set(-140, 120, -90);
   sun.castShadow = true;
   sun.shadow.mapSize.set(1024, 1024);
@@ -53,7 +53,7 @@ export function buildCity(G) {
   const skyGeo = new THREE.SphereGeometry(700, 24, 12);
   const skyMat = new THREE.ShaderMaterial({
     side: THREE.BackSide, depthWrite: false, fog: false,
-    uniforms: { top: { value: new THREE.Color(0x1c2450) }, mid: { value: new THREE.Color(0xe8734a) }, bot: { value: new THREE.Color(0xffc27a) } },
+    uniforms: { top: { value: new THREE.Color(0x3f7fd0) }, mid: { value: new THREE.Color(0x9fd0f0) }, bot: { value: new THREE.Color(0xffe9b8) } },
     vertexShader: 'varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
     fragmentShader: `varying vec3 vP; uniform vec3 top; uniform vec3 mid; uniform vec3 bot;
       void main(){ float h = normalize(vP).y; vec3 c = h > 0.25 ? mix(mid, top, smoothstep(0.25, 0.75, h)) : mix(bot, mid, smoothstep(-0.05, 0.25, h));
@@ -61,7 +61,7 @@ export function buildCity(G) {
   });
   scene.add(new THREE.Mesh(skyGeo, skyMat));
   const sunDisc = new THREE.Mesh(new THREE.CircleGeometry(34, 32),
-    new THREE.MeshBasicMaterial({ color: 0xffd9a0, fog: false }));
+    new THREE.MeshBasicMaterial({ color: 0xfff6d8, fog: false }));
   sunDisc.position.set(-420, 95, -320); sunDisc.lookAt(0, 40, 0);
   scene.add(sunDisc);
 

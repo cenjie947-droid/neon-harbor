@@ -4,6 +4,7 @@
 // window.__shotReady so a screenshot tool knows the frame is ready.
 import * as THREE from 'three';
 import { enterCar } from './vehicles.js';
+import { MISSIONS } from './missions.js';
 
 export function stageShot(G, shot) {
   const renderTwice = () => {
@@ -83,13 +84,16 @@ export function stageShot(G, shot) {
     G.hud.update(G, 0.016);
     renderTwice();
   } else if (shot === 'end') {
-    // mission-complete panel over the garage with the delivered car
+    // mission-complete panel over the garage with the delivered car,
+    // rendered through the same card the real payout uses: job 1 paid
+    // $150 and job 2 pays $300, so the card must read Reward $300 and
+    // Total cash $450. The numbers are never hand-written here.
     document.getElementById('title-screen').classList.add('hidden');
     G.mode = 'playing';
     G.hud.show();
-    G.missions.startMission(G, 0, false);
-    G.missionIndex = 0;
-    G.cash = 150; // mission 1 pays $150 and the player starts at $0
+    G.missions.startMission(G, 1, false);
+    G.missionIndex = 1;
+    G.cash = 150 + 300; // job 1 ($150) already banked + job 2 ($300) just paid
     const car = G.cars.find(c => c.parked) || G.cars[0];
     car.pos.set(G.markers.garage.x + 6, 0, G.markers.garage.z);
     car.heading = Math.PI / 2;
@@ -97,15 +101,14 @@ export function stageShot(G, shot) {
     G.player.pos.set(G.markers.garage.x - 2, 0, G.markers.garage.z + 2);
     G.player.heading = Math.PI / 2;
     G.player.mesh.position.copy(G.player.pos);
-    document.getElementById('mission-panel-title').textContent = 'MISSION COMPLETE';
-    document.getElementById('mission-panel-text').textContent = 'First Wheels — nicely driven, Cole.';
-    document.getElementById('mission-panel-reward').textContent = 'Reward: $150  •  Total cash: $150';
-    document.getElementById('mission-panel').classList.remove('hidden');
+    G.missions.showCompletionCard(G, MISSIONS[1], 1);
     G.camera.position.set(G.markers.garage.x - 14, 6, G.markers.garage.z + 12);
     G.camera.lookAt(G.markers.garage.x, 1.5, G.markers.garage.z);
-    G.hud.setMissionName('Mission 1: First Wheels');
-    G.hud.setObjective('Drive the car to the paint shop');
+    G.hud.setMissionName('Mission 2: The Pickup');
+    G.hud.setObjective("Get the package to Mara's garage — 90 seconds!");
     G.hud.update(G, 0.016);
+    // Freeze on this frame so the camera rig does not drift off the shot.
+    G.mode = 'mission-complete';
     renderTwice();
   }
   window.__shotReady = true;
