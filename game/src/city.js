@@ -76,17 +76,18 @@ function addBuilding(world, x, z, w, h, d, color, front = 0) {
   if (h >= 8) {
     const strip = new THREE.Mesh(new THREE.BoxGeometry(Math.min(w, d) * 0.62, h * 0.55, 0.12), GLASS_SKIN);
     const off = (Math.min(w, d) === w ? d : w) / 2 + 0.07;
-    if (front === 0) {
-      strip.position.set(0, h * 0.52, off);
-    } else if (front === 2) {
-      strip.position.set(0, h * 0.52, -off);
-    } else if (front === 1) {
-      strip.rotation.y = Math.PI / 2;
-      strip.position.set(off, h * 0.52, 0);
-    } else {
-      strip.rotation.y = Math.PI / 2;
-      strip.position.set(-off, h * 0.52, 0);
-    }
+    // [x, z, turn]: which face the band sits on, and whether it turns.
+    const faces = [
+      [0, off, 0],
+      [off, 0, 1],
+      [0, -off, 0],
+      [-off, 0, 1],
+    ];
+    const place = faces[front];
+    if (place[2] === 1) strip.rotation.y = Math.PI / 2;
+    strip.position.x = place[0];
+    strip.position.y = h * 0.52;
+    strip.position.z = place[1];
     node.add(strip);
   }
   node.position.set(x, 0, z);
@@ -249,8 +250,7 @@ function layTerrain(world) {
   // Roads: one dark strip per grid line on each axis, with a thin centre
   // line. The two directions sit at slightly different heights so the
   // crossings do not z-fight.
-  for (let k = 0; k < world.roads.xs.length; k++) {
-    const line = world.roads.xs[k];
+  for (const line of world.roads.xs) {
     groundSlab(scene, 0, line, 480, WORLD.roadWidth, 0x3a3f46, 0.02);
     groundSlab(scene, 0, line, 480, 0.3, 0xd9c05a, 0.05);
     groundSlab(scene, line, 0, WORLD.roadWidth, 480, 0x3a3f46, 0.035);
@@ -314,31 +314,35 @@ function fillCityBlock(world, x0, x1, z0, z1) {
 // marker itself stays on open road: the bank, the hospital, Mara's garage,
 // the paint shop, the showroom lot and the hideout house.
 function addLandmarks(world) {
-  // Harbor Bank: stone block with a columned front, just off its marker.
-  addBuilding(world, 18, 78, 22, 16, 18, 0xc9c2b0, 2);
+  // [x, z, w, h, d, color, front] for the plain landmarks. The hospital
+  // cross and the showroom glass are added to their buildings after.
+  const plain = [
+    [18, 78, 22, 16, 18, 0xc9c2b0, 2],
+    [-42, 78, 24, 8, 16, 0x7a6a5a, 2],
+    [78, 138, 18, 7, 14, 0x5aa8c0, 2],
+    [-102, -162, 12, 7, 11, 0xd9c9a8, 0],
+    [205, 90, 26, 10, 18, pick(DOCK_PAINT), 3],
+    [205, 150, 26, 11, 18, pick(DOCK_PAINT), 3],
+  ];
+  plain.forEach((spec) => {
+    addBuilding(world, spec[0], spec[1], spec[2], spec[3], spec[4], spec[5], spec[6]);
+  });
   // St. Aurelia Hospital: white block with a red cross on the roof.
   const clinic = addBuilding(world, -102, -42, 26, 18, 20, 0xe8e8e8, 0);
   const barA = new THREE.Mesh(new THREE.BoxGeometry(6, 1, 2), skin(0xc0392b));
-  barA.position.set(0, 19.5, 0);
+  barA.position.y = 19.5;
   const barB = new THREE.Mesh(new THREE.BoxGeometry(2, 1, 6), skin(0xc0392b));
-  barB.position.set(0, 19.5, 0);
+  barB.position.y = 19.5;
   clinic.add(barA);
   clinic.add(barB);
-  // Mara's garage: low wide shed with a big door facing the road.
-  addBuilding(world, -42, 78, 24, 8, 16, 0x7a6a5a, 2);
-  // Paint shop: a colourful low shop on Harbor Row.
-  addBuilding(world, 78, 138, 18, 7, 14, 0x5aa8c0, 2);
   // Showroom: a glass-front lot building; the Comet sits on the open
   // ground in front of it, on the marker.
   const lot = addBuilding(world, 78, -102, 24, 9, 18, 0x2a3a4a, 2);
   const pane = new THREE.Mesh(new THREE.BoxGeometry(20, 5, 0.2), GLASS_SKIN);
-  pane.position.set(0, 3.4, -9.1);
+  pane.position.x = 0;
+  pane.position.y = 3.4;
+  pane.position.z = -9.1;
   lot.add(pane);
-  // Hideout: a small house tucked in the north-west corner.
-  addBuilding(world, -102, -162, 12, 7, 11, 0xd9c9a8, 0);
-  // Docks warehouses along the east strip, east of the docks marker.
-  addBuilding(world, 205, 90, 26, 10, 18, pick(DOCK_PAINT), 3);
-  addBuilding(world, 205, 150, 26, 11, 18, pick(DOCK_PAINT), 3);
   // A couple of dock cranes: simple frames over the water edge.
   for (let k = 0; k < 2; k++) {
     const cz = k === 0 ? 100 : 160;
@@ -373,8 +377,8 @@ export function buildCity(world) {
   }
   // A few houses in the north and west edge strips, clear of the roads.
   const edgeHouses = [[-205, -60], [-205, 60], [205, -60], [-60, -205], [60, -205], [-150, -205]];
-  for (let k = 0; k < edgeHouses.length; k++) {
-    addBuilding(world, edgeHouses[k][0], edgeHouses[k][1], rand(10, 13), rand(6, 9), rand(10, 12), pick(HOUSE_PAINT), Math.floor(rand(0, 4)));
+  for (const [hx, hz] of edgeHouses) {
+    addBuilding(world, hx, hz, rand(10, 13), rand(6, 9), rand(10, 12), pick(HOUSE_PAINT), Math.floor(rand(0, 4)));
   }
   addLandmarks(world);
   // Palms along the beach.
@@ -385,10 +389,7 @@ export function buildCity(world) {
   world.ferris = buildFerris(world);
   world.beacon = buildBeacon(world);
   // Named places, as vectors the beacon and the mission checks can use.
-  const keys = Object.keys(MARKERS);
-  for (let k = 0; k < keys.length; k++) {
-    const key = keys[k];
-    const pt = MARKERS[key];
+  for (const [key, pt] of Object.entries(MARKERS)) {
     world.markers[key] = new THREE.Vector3(pt[0], 0, pt[1]);
   }
   // The sun: a warm directional light the main loop lifts to midday.

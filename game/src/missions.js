@@ -20,65 +20,82 @@ import {
 
 const byId = (id) => document.getElementById(id);
 
+// Builders for the job table below. A step carries everything its
+// checker needs: the kind of test, the objective line, the marker to
+// aim at, how close counts, a countdown in seconds, a wanted floor, and
+// the special car it is about.
+function beat(type, text, target, radius, seconds, wanted, car) {
+  const step = {};
+  step.type = type;
+  step.text = text;
+  step.target = target;
+  step.radius = radius;
+  step.seconds = seconds;
+  step.wanted = wanted;
+  step.car = car;
+  return step;
+}
+
+function job(name, reward, briefing, steps) {
+  const entry = {};
+  entry.name = name;
+  entry.reward = reward;
+  entry.briefing = briefing;
+  entry.steps = steps;
+  return entry;
+}
+
 // One entry per job, in story order. `reward` is what the job pays on top
 // of whatever Cole already holds; `steps` run in order and the chain ends
-// when the last one reports done. A step carries everything its checker
-// needs: the kind of test, the objective line, the marker to aim at, how
-// close counts, a countdown in seconds, a wanted floor, and the special
-// car it is about.
+// when the last one reports done.
 export const MISSIONS = [
-  {
-    name: 'First Wheels',
-    reward: 150,
-    briefing:
-      'Mara Quinn: "Cole, welcome to Neon Harbor. First job is simple — grab any car on the street and bring it to the paint shop on Harbor Row. Don\'t scratch it. Actually, scratch it. I don\'t care."',
-    steps: [
-      { type: 'steal', text: 'Steal any car — walk up to one and press E', target: null, radius: 0, seconds: 0, wanted: 0, car: null },
-      { type: 'drive', text: 'Drive the car to the paint shop', target: 'paintShop', radius: 8, seconds: 0, wanted: 0, car: null },
+  job(
+    'First Wheels',
+    150,
+    'Mara Quinn: "Cole, welcome to Neon Harbor. First job is simple — grab any car on the street and bring it to the paint shop on Harbor Row. Don\'t scratch it. Actually, scratch it. I don\'t care."',
+    [
+      beat('steal', 'Steal any car — walk up to one and press E', null, 0, 0, 0, null),
+      beat('drive', 'Drive the car to the paint shop', 'paintShop', 8, 0, 0, null),
     ],
-  },
-  {
-    name: 'The Pickup',
-    reward: 300,
-    briefing:
-      'Mara Quinn: "A package is waiting at the docks, Pier 9. Pick it up on foot, then get it back to my garage. Fast. The harbor cops get nosy after dark."',
-    steps: [
-      { type: 'drive', text: 'Drive to the docks', target: 'docks', radius: 9, seconds: 0, wanted: 0, car: null },
-      { type: 'pickup', text: 'Get out and grab the package', target: 'docks', radius: 5, seconds: 0, wanted: 0, car: null },
-      { type: 'timed', text: "Get the package to Mara's garage — 90 seconds!", target: 'garage', radius: 9, seconds: 90, wanted: 0, car: null },
+  ),
+  job(
+    'The Pickup',
+    300,
+    'Mara Quinn: "A package is waiting at the docks, Pier 9. Pick it up on foot, then get it back to my garage. Fast. The harbor cops get nosy after dark."',
+    [
+      beat('drive', 'Drive to the docks', 'docks', 9, 0, 0, null),
+      beat('pickup', 'Get out and grab the package', 'docks', 5, 0, 0, null),
+      beat('timed', "Get the package to Mara's garage — 90 seconds!", 'garage', 9, 90, 0, null),
     ],
-  },
-  {
-    name: 'Grand Theft Harbor',
-    reward: 600,
-    briefing:
-      'Mara Quinn: "A yellow Comet GT is sitting in the showroom lot on Meridian. Dario Venn wants it too, so the cops will be all over you the second you take it. Steal it. Bring it to the garage."',
-    steps: [
-      { type: 'stealSpecific', text: 'Steal the yellow Comet GT from the showroom lot', target: null, radius: 0, seconds: 0, wanted: 0, car: 'comet' },
-      { type: 'drive', text: 'Lose the heat and deliver the Comet GT to the garage', target: 'garage', radius: 9, seconds: 0, wanted: 2, car: null },
+  ),
+  job(
+    'Grand Theft Harbor',
+    600,
+    'Mara Quinn: "A yellow Comet GT is sitting in the showroom lot on Meridian. Dario Venn wants it too, so the cops will be all over you the second you take it. Steal it. Bring it to the garage."',
+    [
+      beat('stealSpecific', 'Steal the yellow Comet GT from the showroom lot', null, 0, 0, 0, 'comet'),
+      beat('drive', 'Lose the heat and deliver the Comet GT to the garage', 'garage', 9, 0, 2, null),
     ],
-  },
-  {
-    name: 'Dockside Heat',
-    reward: 900,
-    briefing:
-      'Mara Quinn: "Venn\'s crew is holding my warehouse on the east docks. Go in loud. Take them all down, then get back to the hideout before the PD locks the whole pier down."',
-    steps: [
-      { type: 'goto', text: 'Go to the warehouse on the east docks', target: 'warehouse', radius: 10, seconds: 0, wanted: 0, car: null },
-      { type: 'ambush', text: "Take down Venn's crew", target: null, radius: 0, seconds: 0, wanted: 0, car: null },
-      { type: 'goto', text: 'Escape to the hideout', target: 'hideout', radius: 9, seconds: 0, wanted: 0, car: null },
+  ),
+  job(
+    'Dockside Heat',
+    900,
+    'Mara Quinn: "Venn\'s crew is holding my warehouse on the east docks. Go in loud. Take them all down, then get back to the hideout before the PD locks the whole pier down."',
+    [
+      beat('goto', 'Go to the warehouse on the east docks', 'warehouse', 10, 0, 0, null),
+      beat('ambush', "Take down Venn's crew", null, 0, 0, 0, null),
+      beat('goto', 'Escape to the hideout', 'hideout', 9, 0, 0, null),
     ],
-  },
-  {
-    name: 'The Big One',
-    reward: 2500,
-    briefing:
-      'Mara Quinn: "This is it, Cole. The Harbor Bank van leaves at dusk. Take the van, punch through every roadblock Venn bought, and bring it to the hideout. Do this and we own this city."',
-    steps: [
-      { type: 'enterSpecific', text: 'Take the armored bank van', target: null, radius: 0, seconds: 0, wanted: 0, car: 'bankvan' },
-      { type: 'drive', text: 'Drive the van to the hideout — through the roadblocks!', target: 'hideout', radius: 10, seconds: 0, wanted: 4, car: null },
+  ),
+  job(
+    'The Big One',
+    2500,
+    'Mara Quinn: "This is it, Cole. The Harbor Bank van leaves at dusk. Take the van, punch through every roadblock Venn bought, and bring it to the hideout. Do this and we own this city."',
+    [
+      beat('enterSpecific', 'Take the armored bank van', null, 0, 0, 0, 'bankvan'),
+      beat('drive', 'Drive the van to the hideout — through the roadblocks!', 'hideout', 10, 0, 4, null),
     ],
-  },
+  ),
 ];
 
 // How close Cole (or his car) has to be to a marker for a beat to count.
@@ -191,7 +208,8 @@ export class Missions {
     w.missionIndex = index;
     let step = startStep | 0;
     if (step < 0) step = 0;
-    if (step > task.steps.length - 1) step = task.steps.length - 1;
+    const lastBeat = task.steps.length - 1;
+    if (step > lastBeat) step = lastBeat;
     w.missionStep = step;
     w.missionActive = true;
     w.missionDone = false;
@@ -232,9 +250,9 @@ export class Missions {
         [4, -8],
         [-6, -6],
       ];
-      for (let k = 0; k < crew.length; k++) {
-        w.combat.spawnEnemy(w, warehouse.x + crew[k][0], warehouse.z + crew[k][1]);
-      }
+      crew.forEach(([dx, dz]) => {
+        w.combat.spawnEnemy(w, warehouse.x + dx, warehouse.z + dz);
+      });
       w.hud.showMessage("Ambush! Venn's crew is here — take them down!");
       w.audio.fail();
     }
@@ -391,10 +409,13 @@ export class Missions {
   offerFare(w) {
     const taxi = w.taxi;
     const nearby = [];
-    for (let i = 0; i < w.peds.length; i++) {
+    let i = 0;
+    while (i < w.peds.length) {
       const ped = w.peds[i];
+      i++;
       if (ped.state !== 'walk') continue;
-      if (dist2D(ped.pos.x, ped.pos.z, w.player.pos.x, w.player.pos.z) >= 70) continue;
+      const d = dist2D(ped.pos.x, ped.pos.z, w.player.pos.x, w.player.pos.z);
+      if (d >= 70) continue;
       nearby.push(ped);
     }
     if (nearby.length === 0) {

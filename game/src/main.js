@@ -290,7 +290,7 @@ function bindMenus() {
     }],
   ];
   showResume();
-  for (let k = 0; k < wiring.length; k++) byId(wiring[k][0]).addEventListener('click', wiring[k][1]);
+  for (const [id, fn] of wiring) byId(id).addEventListener('click', fn);
 }
 
 // --- world assembly -------------------------------------------------------
@@ -307,7 +307,9 @@ function setupRenderer() {
   sim.renderer = renderer;
   sim.scene = new THREE.Scene();
   sim.camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 1500);
-  sim.camera.position.set(-40, 8, -14);
+  sim.camera.position.x = -40;
+  sim.camera.position.y = 8;
+  sim.camera.position.z = -14;
   window.addEventListener('resize', () => {
     sim.camera.aspect = window.innerWidth / window.innerHeight;
     sim.camera.updateProjectionMatrix();
@@ -343,7 +345,9 @@ function assembleWorld() {
   sim.save = new SaveData();
   bindKeys();
   bindMenus();
-  sim.camera.position.set(-60, 26, -60);
+  sim.camera.position.x = -60;
+  sim.camera.position.y = 26;
+  sim.camera.position.z = -60;
   sim.camera.lookAt(0, 4, 0);
 }
 
@@ -366,7 +370,9 @@ function startRun(missionIndex, fromSave) {
   } else {
     sim.cash = 0;
     const hero = sim.player;
-    hero.pos.set(-60, 0, -34);
+    hero.pos.x = -60;
+    hero.pos.y = 0;
+    hero.pos.z = -34;
     hero.heading = 0;
     hero.health = 100;
     sim.wanted = 0;
@@ -387,7 +393,9 @@ function placeCameraBehind() {
   const bx = hero.pos.x + Math.sin(behind) * 8;
   const bz = hero.pos.z + Math.cos(behind) * 8;
   const open = collideCircle(sim, bx, bz, 1.2);
-  sim.camera.position.set(open.x, 4.5, open.z);
+  sim.camera.position.x = open.x;
+  sim.camera.position.y = 4.5;
+  sim.camera.position.z = open.z;
   sim.camera.lookAt(hero.pos.x, 1.7, hero.pos.z);
 }
 
@@ -408,15 +416,16 @@ function enforceCameraClearance() {
   const span = offset.length();
   if (span < 0.5) return;
   const dir = offset.clone().multiplyScalar(1 / span);
-  const samples = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
   let clearTo = 0;
-  for (let i = 0; i < samples.length; i++) {
-    const test = origin.clone().addScaledVector(dir, span * samples[i]);
+  let t = 0.1;
+  while (t <= 1.0 + 1e-9) {
+    const test = origin.clone().addScaledVector(dir, span * t);
     if (collideCircle(sim, test.x, test.z, 0.5).hit) break;
-    clearTo = i + 1;
+    clearTo++;
+    t += 0.1;
   }
-  if (clearTo < samples.length) {
-    const draw = Math.max(1.5, (span * clearTo) / samples.length - 0.6);
+  if (clearTo < 10) {
+    const draw = Math.max(1.5, (span * clearTo) / 10 - 0.6);
     cam.position.copy(origin).addScaledVector(dir, draw);
   }
   if (cam.position.y < 1.5) cam.position.y = 1.5;
@@ -467,7 +476,9 @@ function refreshPrompt() {
 
 function spinTitleCamera() {
   const a = sim.time * 0.03;
-  sim.camera.position.set(Math.sin(a) * 120, 42, Math.cos(a) * 120);
+  sim.camera.position.x = Math.sin(a) * 120;
+  sim.camera.position.y = 42;
+  sim.camera.position.z = Math.cos(a) * 120;
   sim.camera.lookAt(0, 6, 0);
 }
 
@@ -507,94 +518,65 @@ function installTestHook() {
   const hero = sim.player;
   // Read-only snapshots for tests, plus the handful of actions a test
   // needs (teleport, start a mission, step the loop, press a key).
-  const hook = {
-    get mode() {
-      return sim.mode;
-    },
-    get wanted() {
-      return sim.wanted;
-    },
-    get cash() {
-      return sim.cash;
-    },
-    get mission() {
-      return sim.missionIndex;
-    },
-    get missionStep() {
-      return sim.missionStep;
-    },
-    get driving() {
-      return !!hero.car;
-    },
-    get health() {
-      return hero.health;
-    },
-    get carHealth() {
-      return hero.car ? hero.car.health : null;
-    },
-    get ammo() {
-      return hero.ammo;
-    },
-    get weapon() {
-      return hero.weapon;
-    },
-    get pos() {
-      return { x: hero.pos.x, y: hero.pos.y, z: hero.pos.z };
-    },
-    get cars() {
-      return sim.cars.length;
-    },
-    get police() {
-      return sim.policeCars.length + sim.officers.length;
-    },
-    get policeCars() {
-      return sim.policeCars.length;
-    },
-    get peds() {
-      return sim.peds.length;
-    },
-    get enemies() {
-      return sim.enemies.length;
-    },
-    get carName() {
-      return hero.car ? hero.car.name : null;
-    },
-    get taxiPhase() {
-      return sim.taxi.phase;
-    },
-    get taxiFare() {
-      return sim.taxi.fare;
-    },
-    get cameraLocked() {
-      return document.pointerLockElement === byId('scene');
-    },
-    teleport(x, z) {
-      hero.pos.set(x, 0, z);
-      if (hero.car) hero.car.pos.set(x, 0, z);
-    },
-    startMission(i) {
-      sim.missions.startMission(sim, i, false);
-      sim.mode = 'playing';
-    },
-    step(dt) {
-      tick(dt || 0.05);
-      renderScene();
-    },
-    setRender(on) {
-      sim.renderEnabled = !!on;
-      sim._render = !!on;
-    },
-    pressKey(code, down) {
-      if (down) sim.input.keys.add(code);
-      else sim.input.keys.delete(code);
-    },
-    // Test-only hook: hurt Cole through the real damage path (invuln,
-    // vignette, wasted flow) without staging an enemy.
-    hurt(amount) {
-      damagePlayer(sim, amount, 'test');
-    },
-    G: sim,
+  // Readings are wired from a table so each one stays a live getter.
+  const hook = {};
+  const readings = [
+    ['mode', () => sim.mode],
+    ['wanted', () => sim.wanted],
+    ['cash', () => sim.cash],
+    ['mission', () => sim.missionIndex],
+    ['missionStep', () => sim.missionStep],
+    ['driving', () => !!hero.car],
+    ['health', () => hero.health],
+    ['carHealth', () => (hero.car ? hero.car.health : null)],
+    ['ammo', () => hero.ammo],
+    ['weapon', () => hero.weapon],
+    ['pos', () => ({ x: hero.pos.x, y: hero.pos.y, z: hero.pos.z })],
+    ['cars', () => sim.cars.length],
+    ['police', () => sim.policeCars.length + sim.officers.length],
+    ['policeCars', () => sim.policeCars.length],
+    ['peds', () => sim.peds.length],
+    ['enemies', () => sim.enemies.length],
+    ['carName', () => (hero.car ? hero.car.name : null)],
+    ['taxiPhase', () => sim.taxi.phase],
+    ['taxiFare', () => sim.taxi.fare],
+    ['cameraLocked', () => document.pointerLockElement === byId('scene')],
+  ];
+  readings.forEach(([name, read]) => {
+    Object.defineProperty(hook, name, { get: read, enumerable: true });
+  });
+  hook.teleport = (x, z) => {
+    hero.pos.x = x;
+    hero.pos.y = 0;
+    hero.pos.z = z;
+    if (hero.car) {
+      hero.car.pos.x = x;
+      hero.car.pos.y = 0;
+      hero.car.pos.z = z;
+    }
   };
+  hook.startMission = (i) => {
+    sim.missions.startMission(sim, i, false);
+    sim.mode = 'playing';
+  };
+  hook.step = (dt) => {
+    tick(dt || 0.05);
+    renderScene();
+  };
+  hook.setRender = (on) => {
+    sim.renderEnabled = !!on;
+    sim._render = !!on;
+  };
+  hook.pressKey = (code, down) => {
+    if (down) sim.input.keys.add(code);
+    else sim.input.keys.delete(code);
+  };
+  // Test-only hook: hurt Cole through the real damage path (invuln,
+  // vignette, wasted flow) without staging an enemy.
+  hook.hurt = (amount) => {
+    damagePlayer(sim, amount, 'test');
+  };
+  hook.G = sim;
   window.__game = hook;
 }
 

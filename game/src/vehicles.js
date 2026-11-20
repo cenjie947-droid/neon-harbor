@@ -55,7 +55,9 @@ function halfExtents(car) {
 // reads as a list of pieces rather than a run of constructor calls.
 function boxPart(width, height, depth, material, x, y, z) {
   const piece = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
-  piece.position.set(x, y, z);
+  piece.position.x = x;
+  piece.position.y = y;
+  piece.position.z = z;
   return piece;
 }
 
@@ -81,14 +83,20 @@ export function makeCarMesh(color, isVan = false, isPolice = false) {
   const tyreGeo = new THREE.CylinderGeometry(TYRE_R, TYRE_R, 0.3, 12);
   const tyreMat = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 0.9 });
   const wheels = [];
-  for (let s = -1; s <= 1; s += 2) {
-    for (let e = 0; e < 2; e++) {
+  let s = -1;
+  while (s <= 1) {
+    let e = 0;
+    while (e < 2) {
       const tyre = new THREE.Mesh(tyreGeo, tyreMat);
       tyre.rotation.z = Math.PI / 2;
-      tyre.position.set(s * AXLE_X, TYRE_Y, e === 0 ? AXLE_Z : -AXLE_Z);
+      tyre.position.x = s * AXLE_X;
+      tyre.position.y = TYRE_Y;
+      tyre.position.z = e === 0 ? AXLE_Z : -AXLE_Z;
       group.add(tyre);
       wheels.push(tyre);
+      e++;
     }
+    s += 2;
   }
   const glowMat = new THREE.MeshBasicMaterial({ color: LAMP_HEX });
   group.add(boxPart(0.35, 0.18, 0.1, glowMat, -0.6, 0.8, len / 2 + 0.02));
@@ -111,12 +119,14 @@ export function makeCarMesh(color, isVan = false, isPolice = false) {
       [0x2266ff, 0.3],
     ];
     const lights = [];
-    for (let k = 0; k < lightSpecs.length; k++) {
+    let k = 0;
+    while (k < lightSpecs.length) {
       const hue = lightSpecs[k][0];
       const ox = lightSpecs[k][1];
       const lamp = boxPart(0.5, 0.2, 0.4, new THREE.MeshBasicMaterial({ color: hue }), ox, ht + 0.9, -0.2);
       group.add(lamp);
       lights.push(lamp);
+      k++;
     }
     group.userData.policeLights = lights;
   }
@@ -126,34 +136,37 @@ export function makeCarMesh(color, isVan = false, isPolice = false) {
 export function createCar(world, opts) {
   const built = makeCarMesh(opts.color, opts.isVan, opts.isPolice);
   const group = built.group;
-  group.position.set(opts.x, 0, opts.z);
+  group.position.x = opts.x;
+  group.position.y = 0;
+  group.position.z = opts.z;
   group.rotation.y = opts.heading || 0;
   world.scene.add(group);
-  const car = {
-    mesh: group,
-    wheels: built.wheels,
-    name: opts.name || pick(MODELS),
-    pos: group.position,
-    heading: opts.heading || 0,
-    speed: 0,
-    color: opts.color,
-    isVan: !!opts.isVan,
-    isPolice: !!opts.isPolice,
-    parked: !!opts.parked,
-    traffic: !!opts.traffic,
-    maxSpeed: opts.isVan ? 26 : opts.isPolice ? 36 : 30 + rand(0, 6),
-    accel: opts.isVan ? 11 : 16,
-    health: 100,
-    maxHealth: 100,
-    smokeTimer: 0,
-    laneRoad: null,
-    laneAxis: null,
-    laneDir: 1,
-    laneOffset: 0,
-    aiSpeed: 0,
-    stuck: 0,
-    ramCooldown: 0,
-  };
+  const car = {};
+  car.mesh = group;
+  car.wheels = built.wheels;
+  car.name = opts.name || pick(MODELS);
+  car.pos = group.position;
+  car.heading = opts.heading || 0;
+  car.speed = 0;
+  car.color = opts.color;
+  car.isVan = !!opts.isVan;
+  car.isPolice = !!opts.isPolice;
+  car.parked = !!opts.parked;
+  car.traffic = !!opts.traffic;
+  if (opts.isVan) car.maxSpeed = 26;
+  else if (opts.isPolice) car.maxSpeed = 36;
+  else car.maxSpeed = 30 + rand(0, 6);
+  car.accel = opts.isVan ? 11 : 16;
+  car.health = 100;
+  car.maxHealth = 100;
+  car.smokeTimer = 0;
+  car.laneRoad = null;
+  car.laneAxis = null;
+  car.laneDir = 1;
+  car.laneOffset = 0;
+  car.aiSpeed = 0;
+  car.stuck = 0;
+  car.ramCooldown = 0;
   if (car.traffic) giveTrafficLane(world, car);
   world.cars.push(car);
   if (car.traffic) world.traffic.push(car);
@@ -171,11 +184,17 @@ function giveTrafficLane(world, car) {
   car.laneOffset = [-3.5, 3.5][Math.random() < 0.5 ? 0 : 1];
   car.speed = car.aiSpeed;
   if (car.laneAxis === 'x') {
-    car.pos.set(car.laneRoad + car.laneOffset, 0, rand(-220, 150));
-    car.heading = car.laneDir > 0 ? 0 : Math.PI;
+    car.pos.x = car.laneRoad + car.laneOffset;
+    car.pos.y = 0;
+    car.pos.z = rand(-220, 150);
+    if (car.laneDir > 0) car.heading = 0;
+    else car.heading = Math.PI;
   } else {
-    car.pos.set(rand(-220, 220), 0, car.laneRoad + car.laneOffset);
-    car.heading = car.laneDir > 0 ? Math.PI / 2 : -Math.PI / 2;
+    car.pos.x = rand(-220, 220);
+    car.pos.y = 0;
+    car.pos.z = car.laneRoad + car.laneOffset;
+    if (car.laneDir > 0) car.heading = Math.PI / 2;
+    else car.heading = -Math.PI / 2;
   }
   car.mesh.rotation.y = car.heading;
 }
@@ -304,6 +323,14 @@ export function spawnTraffic(world, count) {
   }
 }
 
+// Move a value toward a target by at most one step, never overshooting.
+// The driving model and the traffic AI both ease speeds this way.
+function approach(cur, target, maxStep) {
+  if (cur < target) return Math.min(target, cur + maxStep);
+  if (cur > target) return Math.max(target, cur - maxStep);
+  return cur;
+}
+
 // How much of its top speed and acceleration a car keeps at its current
 // health: full while healthy, sagging below 60, crawling below 35, and
 // nothing at all once it is disabled.
@@ -347,8 +374,10 @@ export function carBoxDistance(car, x, z) {
 export function nearestCar(world, pos, maxDist) {
   let near = null;
   let nearD = maxDist;
-  for (let i = 0; i < world.cars.length; i++) {
+  let i = 0;
+  while (i < world.cars.length) {
     const car = world.cars[i];
+    i++;
     if (car.isPolice && world.policeCars.includes(car)) continue;
     const d = carBoxDistance(car, pos.x, pos.z);
     if (d >= nearD) continue;
@@ -376,7 +405,9 @@ export function exitCar(world) {
   car.speed = 0;
   hero.car = null;
   // Step out to the driver's side, clear of any wall.
-  hero.pos.set(car.pos.x + Math.cos(car.heading) * 2.6, 0, car.pos.z - Math.sin(car.heading) * 2.6);
+  hero.pos.x = car.pos.x + Math.cos(car.heading) * 2.6;
+  hero.pos.y = 0;
+  hero.pos.z = car.pos.z - Math.sin(car.heading) * 2.6;
   const open = collideCircle(world, hero.pos.x, hero.pos.z, 0.55);
   hero.pos.x = open.x;
   hero.pos.z = open.z;
@@ -398,8 +429,11 @@ export function drivePlayerCar(world, dt) {
   const brake = held.has('Space');
   const cap = car.maxSpeed * wear;
   const push = gas !== 0 ? car.accel * wear : 8;
-  car.speed += clamp(gas * cap - car.speed, -push * dt, push * dt);
-  if (brake) car.speed *= Math.max(0, 1 - dt * 2.2);
+  car.speed = approach(car.speed, gas * cap, push * dt);
+  if (brake) {
+    const drag = Math.max(0, 1 - dt * 2.2);
+    car.speed *= drag;
+  }
   const turn = held.has('KeyD') ? -1 : held.has('KeyA') ? 1 : 0;
   const bite = clamp(Math.abs(car.speed) / 12, 0, 1);
   const yaw = turn * 1.9 * bite * Math.sign(car.speed || 1);
@@ -434,7 +468,11 @@ export function drivePlayerCar(world, dt) {
   shoveTraffic(world, car);
   car.mesh.position.copy(car.pos);
   car.mesh.rotation.y = car.heading;
-  for (let i = 0; i < car.wheels.length; i++) car.wheels[i].rotation.x += car.speed * dt * 2.4;
+  let wi = 0;
+  while (wi < car.wheels.length) {
+    car.wheels[wi].rotation.x += car.speed * dt * 2.4;
+    wi++;
+  }
   const lamp = car.mesh.userData.beam;
   if (lamp) lamp.intensity = 22;
   // A badly damaged car smokes from under the hood.
@@ -456,8 +494,10 @@ export function drivePlayerCar(world, dt) {
 // Simple circle push between Cole's car and every other car, so traffic
 // does not ghost through him and a shunt slows both cars.
 function shoveTraffic(world, car) {
-  for (let i = 0; i < world.cars.length; i++) {
+  let i = 0;
+  while (i < world.cars.length) {
     const near = world.cars[i];
+    i++;
     if (near === car) continue;
     const dx = car.pos.x - near.pos.x;
     const dz = car.pos.z - near.pos.z;
@@ -484,8 +524,10 @@ function shoveTraffic(world, car) {
 // null when the car is mid-block. Traffic uses it to decide when a turn
 // is possible at an intersection.
 function closestRoadLine(world, alongPos) {
-  for (let i = 0; i < world.roads.xs.length; i++) {
+  let i = 0;
+  while (i < world.roads.xs.length) {
     const line = world.roads.xs[i];
+    i++;
     if (Math.abs(alongPos - line) < 4) return line;
   }
   return null;
@@ -502,8 +544,10 @@ function tryTurnAtCrossing(world, car) {
 }
 
 export function updateTraffic(world, dt) {
-  for (let i = 0; i < world.traffic.length; i++) {
+  let i = 0;
+  while (i < world.traffic.length) {
     const car = world.traffic[i];
+    i++;
     if (car === world.player.car) continue;
     moveTrafficCar(world, car, dt);
   }
@@ -514,12 +558,14 @@ export function updateTraffic(world, dt) {
 // through it.
 function gapInFront(world, car) {
   let best = null;
-  for (let i = 0; i < world.cars.length; i++) {
+  let i = 0;
+  while (i < world.cars.length) {
     const near = world.cars[i];
+    i++;
     if (near === car) continue;
     const dx = near.pos.x - car.pos.x;
     const dz = near.pos.z - car.pos.z;
-    let ahead;
+    let ahead = false;
     if (car.laneAxis === 'x') {
       ahead = Math.sign(dz) === car.laneDir && Math.abs(dx) < 5 && dz * car.laneDir > 0;
     } else {
@@ -542,12 +588,19 @@ function moveTrafficCar(world, car, dt) {
   const front = gapInFront(world, car);
   if (front !== null && front < 11) pace = Math.min(pace, Math.max(0, (front - 5) * 1.2));
   if (car.stuck > 0) pace = 0;
-  car.speed += clamp(pace - car.speed, -10 * dt, 8 * dt);
+  if (pace > car.speed) car.speed = Math.min(pace, car.speed + 8 * dt);
+  else car.speed = Math.max(pace, car.speed - 10 * dt);
   const side = car.laneAxis === 'x' ? car.pos.x : car.pos.z;
   const drift = car.laneRoad + car.laneOffset - side;
-  let aim;
-  if (car.laneAxis === 'x') aim = car.laneDir > 0 ? 0 : Math.PI;
-  else aim = car.laneDir > 0 ? Math.PI / 2 : -Math.PI / 2;
+  let aim = 0;
+  if (car.laneAxis === 'x') {
+    if (car.laneDir > 0) aim = 0;
+    else aim = Math.PI;
+  } else if (car.laneDir > 0) {
+    aim = Math.PI / 2;
+  } else {
+    aim = -Math.PI / 2;
+  }
   aim += clamp(drift * 0.06, -0.35, 0.35);
   car.heading = angleLerp(car.heading, aim, Math.min(1, dt * 2.2));
   const crossPos = car.laneAxis === 'x' ? car.pos.z : car.pos.x;
@@ -566,5 +619,9 @@ function moveTrafficCar(world, car, dt) {
   }
   car.mesh.position.copy(car.pos);
   car.mesh.rotation.y = car.heading;
-  for (let i = 0; i < car.wheels.length; i++) car.wheels[i].rotation.x += car.speed * dt * 2.4;
+  let wi = 0;
+  while (wi < car.wheels.length) {
+    car.wheels[wi].rotation.x += car.speed * dt * 2.4;
+    wi++;
+  }
 }

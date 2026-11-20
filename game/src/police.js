@@ -83,13 +83,12 @@ export class Police {
   }
 
   clearUnits(w) {
-    for (let i = 0; i < w.policeCars.length; i++) {
-      const cruiser = w.policeCars[i];
+    for (const cruiser of w.policeCars) {
       w.scene.remove(cruiser.mesh);
       w.cars = w.cars.filter((c) => c !== cruiser);
     }
     w.policeCars = [];
-    for (let i = 0; i < w.officers.length; i++) w.scene.remove(w.officers[i].mesh);
+    for (const cop of w.officers) w.scene.remove(cop.mesh);
     w.officers = [];
     this.holdClock = 0;
   }
@@ -120,8 +119,7 @@ export class Police {
     let closest = Infinity;
     let closestPos = null;
     const force = w.policeCars.concat(w.officers);
-    for (let i = 0; i < force.length; i++) {
-      const unit = force[i];
+    for (const unit of force) {
       const d = dist2D(unit.pos.x, unit.pos.z, hero.x, hero.z);
       if (d >= closest) continue;
       closest = d;
@@ -238,17 +236,18 @@ export class Police {
       boxPiece(0.22, 0.6, 0.24, trousers, 0.15, 0.3, 0),
     ];
     node.add(limbs[0], limbs[1]);
-    node.position.set(x, 0, z);
+    node.position.x = x;
+    node.position.y = 0;
+    node.position.z = z;
     w.scene.add(node);
-    const cop = {
-      mesh: node,
-      legL: limbs[0],
-      legR: limbs[1],
-      pos: node.position,
-      heading: 0,
-      phase: 0,
-      speed: OFFICER_WALK,
-    };
+    const cop = {};
+    cop.mesh = node;
+    cop.legL = limbs[0];
+    cop.legR = limbs[1];
+    cop.pos = node.position;
+    cop.heading = 0;
+    cop.phase = 0;
+    cop.speed = OFFICER_WALK;
     w.officers.push(cop);
     return cop;
   }
@@ -260,24 +259,27 @@ export class Police {
   runSiren(w) {
     const hero = w.player.pos;
     let close = false;
-    for (let i = 0; i < w.policeCars.length; i++) {
-      const cruiser = w.policeCars[i];
-      if (dist2D(cruiser.pos.x, cruiser.pos.z, hero.x, hero.z) < SIREN_RANGE) close = true;
+    for (const cruiser of w.policeCars) {
+      if (dist2D(cruiser.pos.x, cruiser.pos.z, hero.x, hero.z) >= SIREN_RANGE) continue;
+      close = true;
     }
     w.audio.setSiren(close && w.wanted > 0);
   }
 
   runChase(w, dt) {
     const hero = w.player;
-    for (let i = 0; i < w.policeCars.length; i++) {
+    let i = 0;
+    while (i < w.policeCars.length) {
       const cruiser = w.policeCars[i];
+      i++;
       const dx = hero.pos.x - cruiser.pos.x;
       const dz = hero.pos.z - cruiser.pos.z;
       const d = Math.hypot(dx, dz) || 1;
       const targetHeading = Math.atan2(dx / d, dz / d);
       cruiser.heading = angleLerp(cruiser.heading, targetHeading, Math.min(1, dt * 1.6));
       const pace = d > 60 ? cruiser.maxSpeed : CHASE_SPEED;
-      cruiser.speed += clamp(pace - cruiser.speed, -14 * dt, 12 * dt);
+      if (pace > cruiser.speed) cruiser.speed = Math.min(pace, cruiser.speed + 12 * dt);
+      else cruiser.speed = Math.max(pace, cruiser.speed - 14 * dt);
       const nx = cruiser.pos.x + Math.sin(cruiser.heading) * cruiser.speed * dt;
       const nz = cruiser.pos.z + Math.cos(cruiser.heading) * cruiser.speed * dt;
       const shift = collideCircle(w, nx, nz, 2.1);
@@ -288,13 +290,16 @@ export class Police {
         cruiser.speed *= 0.5;
       }
       this.ram(w, cruiser, d, dt);
-      for (let k = 0; k < w.traffic.length; k++) {
-        const car = w.traffic[k];
+      for (const car of w.traffic) {
         if (dist2D(cruiser.pos.x, cruiser.pos.z, car.pos.x, car.pos.z) < 5) car.stuck = 0.8;
       }
       cruiser.mesh.position.copy(cruiser.pos);
       cruiser.mesh.rotation.y = cruiser.heading;
-      for (let k = 0; k < cruiser.wheels.length; k++) cruiser.wheels[k].rotation.x += cruiser.speed * dt * 2.4;
+      let k = 0;
+      while (k < cruiser.wheels.length) {
+        cruiser.wheels[k].rotation.x += cruiser.speed * dt * 2.4;
+        k++;
+      }
       this.blinkBar(w, cruiser);
     }
   }
@@ -335,8 +340,10 @@ export class Police {
   runOfficers(w, dt) {
     const hero = w.player;
     let held = false;
-    for (let i = 0; i < w.officers.length; i++) {
+    let i = 0;
+    while (i < w.officers.length) {
       const cop = w.officers[i];
+      i++;
       const dx = hero.pos.x - cop.pos.x;
       const dz = hero.pos.z - cop.pos.z;
       const d = Math.hypot(dx, dz) || 1;

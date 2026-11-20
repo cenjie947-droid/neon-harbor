@@ -51,31 +51,39 @@ const HEALTH_BANDS = [
   { above: -1, fill: PALETTE.critical },
 ];
 
+// Element ids the HUD owns, as [field, id] pairs. The constructor walks
+// this table instead of spelling out one lookup per element.
+const ELEMENT_IDS = [
+  ['hud', 'hud'],
+  ['healthBar', 'health-bar'],
+  ['healthText', 'health-text'],
+  ['cash', 'cash-text'],
+  ['ammo', 'ammo'],
+  ['ammoText', 'ammo-text'],
+  ['stars', 'stars'],
+  ['missionName', 'mission-name'],
+  ['objective', 'objective'],
+  ['crosshair', 'crosshair'],
+  ['minimap', 'minimap'],
+  ['speed', 'speed'],
+  ['speedText', 'speed-text'],
+  ['carHealth', 'car-health'],
+  ['carHealthText', 'car-health-text'],
+  ['feed', 'feed'],
+  ['hint', 'hint'],
+  ['vignette', 'vignette'],
+  ['interact', 'interact'],
+];
+
 export class HUD {
   constructor(game) {
     this.game = game;
-    const wanted = (id) => document.getElementById(id);
-    this.el = {
-      hud: wanted('hud'),
-      healthBar: wanted('health-bar'),
-      healthText: wanted('health-text'),
-      cash: wanted('cash-text'),
-      ammo: wanted('ammo'),
-      ammoText: wanted('ammo-text'),
-      stars: wanted('stars'),
-      missionName: wanted('mission-name'),
-      objective: wanted('objective'),
-      crosshair: wanted('crosshair'),
-      minimap: wanted('minimap'),
-      speed: wanted('speed'),
-      speedText: wanted('speed-text'),
-      carHealth: wanted('car-health'),
-      carHealthText: wanted('car-health-text'),
-      feed: wanted('feed'),
-      hint: wanted('hint'),
-      vignette: wanted('vignette'),
-      interact: wanted('interact'),
-    };
+    this.el = {};
+    for (let i = 0; i < ELEMENT_IDS.length; i++) {
+      const field = ELEMENT_IDS[i][0];
+      const id = ELEMENT_IDS[i][1];
+      this.el[field] = document.getElementById(id);
+    }
     this.mapCtx = this.el.minimap.getContext('2d');
     this.hintTimer = 0;
   }
@@ -109,7 +117,9 @@ export class HUD {
     const feed = this.el.feed;
     feed.prepend(node);
     while (feed.childElementCount > FEED_MAX) feed.removeChild(feed.lastChild);
-    setTimeout(() => node.parentNode && node.parentNode.removeChild(node), FEED_LIFE_MS);
+    setTimeout(() => {
+      if (node.parentNode) node.parentNode.removeChild(node);
+    }, FEED_LIFE_MS);
   }
 
   showHint(text, seconds = 3) {
@@ -126,64 +136,80 @@ export class HUD {
     }, DAMAGE_FLASH_MS);
   }
 
-  update(game, dt) {
-    const cole = game.player;
-    if (!cole) return;
-    this.renderHealth(cole);
-    this.el.cash.textContent = game.cash;
-    this.renderStars(game.wanted);
-    this.renderWeapon(cole);
-    this.renderDrive(cole);
+  update(w, dt) {
+    const hero = w.player;
+    if (!hero) return;
+    this.renderHealth(hero);
+    this.el.cash.textContent = w.cash;
+    this.renderStars(w.wanted);
+    this.renderWeapon(hero);
+    this.renderDrive(hero);
     if (this.hintTimer > 0) {
       this.hintTimer -= dt;
       if (this.hintTimer <= 0) this.el.hint.classList.add('hidden');
     }
-    this.renderMap(game);
+    this.renderMap(w);
   }
 
-  renderHealth(cole) {
-    const hp = clamp(cole.health, 0, 100);
-    const band = HEALTH_BANDS.find((b) => hp > b.above);
+  renderHealth(hero) {
+    const hp = clamp(hero.health, 0, 100);
+    let fill = PALETTE.critical;
+    for (let i = 0; i < HEALTH_BANDS.length; i++) {
+      if (hp > HEALTH_BANDS[i].above) {
+        fill = HEALTH_BANDS[i].fill;
+        break;
+      }
+    }
     const bar = this.el.healthBar;
-    bar.style.width = `${hp}%`;
-    bar.style.background = band.fill;
-    this.el.healthText.textContent = Math.ceil(cole.health);
+    bar.style.width = hp + '%';
+    bar.style.background = fill;
+    this.el.healthText.textContent = Math.ceil(hero.health);
   }
 
   renderStars(wanted) {
-    const lit = '★';
-    const dim = '<span class="off">★</span>';
-    this.el.stars.innerHTML = Array.from({ length: 5 }, (_, i) => (i < wanted ? lit : dim)).join('');
+    let html = '';
+    for (let i = 0; i < 5; i++) {
+      if (i < wanted) html += '★';
+      else html += '<span class="off">★</span>';
+    }
+    this.el.stars.innerHTML = html;
   }
 
-  renderWeapon(cole) {
-    const aiming = cole.weapon === 'pistol' && !cole.car;
+  renderWeapon(hero) {
+    const aiming = hero.weapon === 'pistol' && !hero.car;
     this.el.ammo.classList.toggle('hidden', !aiming);
     this.el.crosshair.classList.toggle('hidden', !aiming);
-    if (aiming) this.el.ammoText.textContent = cole.ammo;
+    if (aiming) this.el.ammoText.textContent = hero.ammo;
   }
 
   // Speed while driving, plus the car's condition: green while healthy,
   // amber when dented, red when it is about to quit. Hidden on foot.
-  renderDrive(cole) {
-    const driving = !!cole.car;
+  renderDrive(hero) {
+    const driving = !!hero.car;
     this.el.speed.classList.toggle('hidden', !driving);
     this.el.carHealth.classList.toggle('hidden', !driving);
     if (!driving) return;
-    this.el.speedText.textContent = Math.round(Math.abs(cole.car.speed) * 2.2);
-    const hp = Math.max(0, Math.round(cole.car.health));
+    this.el.speedText.textContent = Math.round(Math.abs(hero.car.speed) * 2.2);
+    const hp = Math.max(0, Math.round(hero.car.health));
     this.el.carHealthText.textContent = hp;
-    const tone = hp > 60 ? PALETTE.carOk : hp > 30 ? PALETTE.carWorn : PALETTE.carBad;
+    let tone = PALETTE.carBad;
+    if (hp > 60) tone = PALETTE.carOk;
+    else if (hp > 30) tone = PALETTE.carWorn;
     this.el.carHealth.style.color = tone;
   }
 
-  renderMap(game) {
+  renderMap(w) {
     const ctx = this.mapCtx;
     const edge = MAP_EDGE;
     const mid = edge / 2;
-    const px = game.player.pos.x;
-    const pz = game.player.pos.z;
-    const project = (x, z) => ({ x: mid + (x - px) * MAP_ZOOM, y: mid + (z - pz) * MAP_ZOOM });
+    const px = w.player.pos.x;
+    const pz = w.player.pos.z;
+    const project = (x, z) => {
+      const at = {};
+      at.x = mid + (x - px) * MAP_ZOOM;
+      at.y = mid + (z - pz) * MAP_ZOOM;
+      return at;
+    };
     const plot = (x, z, r, color) => {
       const at = project(x, z);
       if (at.x < -5 || at.x > edge + 5 || at.y < -5 || at.y > edge + 5) return;
@@ -211,10 +237,17 @@ export class HUD {
     }
     ctx.strokeStyle = PALETTE.road;
     ctx.lineWidth = Math.max(2, WORLD.roadWidth * MAP_ZOOM);
-    const roadRuns = [];
-    for (const rx of game.roads.xs) roadRuns.push([project(rx, -240), project(rx, 240)]);
-    for (const rz of game.roads.zs) roadRuns.push([project(-240, rz), project(240, rz)]);
-    for (const [from, to] of roadRuns) {
+    for (let i = 0; i < w.roads.xs.length; i++) {
+      const from = project(w.roads.xs[i], -240);
+      const to = project(w.roads.xs[i], 240);
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+    }
+    for (let i = 0; i < w.roads.zs.length; i++) {
+      const from = project(-240, w.roads.zs[i]);
+      const to = project(240, w.roads.zs[i]);
       ctx.beginPath();
       ctx.moveTo(from.x, from.y);
       ctx.lineTo(to.x, to.y);
@@ -228,14 +261,14 @@ export class HUD {
     ctx.fillStyle = PALETTE.sand;
     ctx.fillRect(0, sandAt.y, edge, waterAt.y - sandAt.y);
     // Pay N Spray: a blue square so the garage is findable on the map.
-    if (game.markers.spray) {
-      const at = project(game.markers.spray.x, game.markers.spray.z);
+    if (w.markers.spray) {
+      const at = project(w.markers.spray.x, w.markers.spray.z);
       ctx.fillStyle = PALETTE.spray;
       ctx.fillRect(at.x - 4, at.y - 4, 8, 8);
     }
-    this.drawObjectiveDiamond(ctx, project, game);
-    this.drawMapDots(ctx, plot, game);
-    this.drawPlayerArrow(ctx, mid, game);
+    this.drawObjectiveDiamond(ctx, project, w);
+    this.drawMapDots(ctx, plot, w);
+    this.drawPlayerArrow(ctx, mid, w);
     ctx.restore();
     ctx.strokeStyle = PALETTE.ring;
     ctx.lineWidth = 2;
@@ -245,11 +278,11 @@ export class HUD {
   }
 
   // Objective marker: a pulsing yellow diamond.
-  drawObjectiveDiamond(ctx, project, game) {
-    if (!game.beaconTarget) return;
-    const at = project(game.beaconTarget.x, game.beaconTarget.z);
-    const r = 7 + Math.sin(game.time * 5) * 2;
-    const points = [
+  drawObjectiveDiamond(ctx, project, w) {
+    if (!w.beaconTarget) return;
+    const at = project(w.beaconTarget.x, w.beaconTarget.z);
+    const r = 7 + Math.sin(w.time * 5) * 2;
+    const corners = [
       [at.x, at.y - r],
       [at.x + r, at.y],
       [at.x, at.y + r],
@@ -257,7 +290,10 @@ export class HUD {
     ];
     ctx.fillStyle = PALETTE.beacon;
     ctx.beginPath();
-    points.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
+    for (let i = 0; i < corners.length; i++) {
+      if (i === 0) ctx.moveTo(corners[i][0], corners[i][1]);
+      else ctx.lineTo(corners[i][0], corners[i][1]);
+    }
     ctx.closePath();
     ctx.fill();
     ctx.strokeStyle = '#fff';
@@ -265,27 +301,25 @@ export class HUD {
     ctx.stroke();
   }
 
-  drawMapDots(ctx, plot, game) {
-    const groups = [
-      [game.traffic, 2.5, PALETTE.trafficDot],
-      [game.policeCars, 3.5, PALETTE.copDot],
-      [game.officers, 2.5, PALETTE.officerDot],
-      [game.peds, 1.8, PALETTE.pedDot],
-      [game.enemies, 3, PALETTE.enemyDot],
-    ];
-    groups.forEach(([list, r, color]) => {
-      list.forEach((obj) => plot(obj.pos.x, obj.pos.z, r, color));
-    });
+  drawMapDots(ctx, plot, w) {
+    const dots = (list, r, color) => {
+      for (let i = 0; i < list.length; i++) plot(list[i].pos.x, list[i].pos.z, r, color);
+    };
+    dots(w.traffic, 2.5, PALETTE.trafficDot);
+    dots(w.policeCars, 3.5, PALETTE.copDot);
+    dots(w.officers, 2.5, PALETTE.officerDot);
+    dots(w.peds, 1.8, PALETTE.pedDot);
+    dots(w.enemies, 3, PALETTE.enemyDot);
     // The waiting taxi fare, if any, shows as a yellow dot.
-    if (game.taxi && game.taxi.client) {
-      plot(game.taxi.client.pos.x, game.taxi.client.pos.z, 3.5, PALETTE.fareDot);
+    if (w.taxi && w.taxi.client) {
+      plot(w.taxi.client.pos.x, w.taxi.client.pos.z, 3.5, PALETTE.fareDot);
     }
   }
 
   // Player arrow, centred, pointing along the heading (see the note at
   // the top of this file for why the rotation is PI - heading).
-  drawPlayerArrow(ctx, mid, game) {
-    const heading = game.player.car ? game.player.car.heading : game.player.heading;
+  drawPlayerArrow(ctx, mid, w) {
+    const heading = w.player.car ? w.player.car.heading : w.player.heading;
     ctx.save();
     ctx.translate(mid, mid);
     ctx.rotate(HUD.arrowRotation(heading));
@@ -299,7 +333,10 @@ export class HUD {
       [-5.5, 6],
     ];
     ctx.beginPath();
-    outline.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
+    for (let i = 0; i < outline.length; i++) {
+      if (i === 0) ctx.moveTo(outline[i][0], outline[i][1]);
+      else ctx.lineTo(outline[i][0], outline[i][1]);
+    }
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
