@@ -1,31 +1,30 @@
-// Neon Harbor — the entry point. This file builds the renderer, brightens
-// the light, wires every key and mouse, runs the per-frame update, owns
-// the menus, and hands automated tests a debug handle on window.__game.
-// The world itself lives in the other modules; this file only drives them
-// in the right order.
+// Neon Harbor — front door of the game.
 //
-// Two things live here and nowhere else. First, the look: the city
-// builder ships dusk-grade light, but this game is meant to read as a
-// bright, sun-soaked modern city, so the sun, the sky fill and the
-// exposure are lifted here once the city is built. Second, the camera:
-// the on-foot and driving rigs in player.js lerp toward their target,
-// which can drag the lens through a wall after a Continue spawn — so
-// every frame ends with a keep-out pass that shoves the camera back out
-// of any building it ended up inside, and a fresh or continued game snaps
-// the camera to a clear spot behind Cole instead of lerping in from the
-// title orbit.
+// This module owns the bits that glue everything else together: it
+// creates the renderer, turns the city's evening light into a hard
+// midday sun, listens to the keyboard and the mouse, steps the world
+// once per frame, and owns every menu screen. The city, the cars, the
+// cops and the story all live in their own modules; this one only
+// decides the order they run in and what the player sees while they do.
 //
-// Mouse look: the HUD layer is pointer-events:none, so clicks reach the
-// canvas — but a click on a menu overlay or a button must not also swing
-// a punch, and a drag has to keep working when pointer lock refuses
-// (headless browsers, mostly). Input therefore listens on the window in
-// the capture phase, ignores anything that hit a button or an overlay,
-// and treats a held drag as a look fallback whenever the pointer is not
-// locked.
+// The camera gets special treatment here. The on-foot and driving rigs
+// in player.js ease toward where they want to be, and easing can drag
+// the lens straight through a wall — most visibly right after a
+// Continue, when the camera starts out on the far side of the map from
+// Cole. So each frame ends with a clearance pass that shoves the camera
+// out of any building it landed inside, and every fresh or continued
+// run snaps the camera to an open spot behind Cole first.
 //
-// Pay N Spray lives here too: drive onto the pad by the kiosk, press F,
-// pay $100, and the wanted stars clear and the car comes back to full
-// health. The taxi side job's T key is wired here as well.
+// Mouse look has to survive two awkward cases: a click on a menu must
+// not also throw a punch, and a drag has to keep steering the view when
+// the browser refuses pointer lock (headless test browsers do). Input
+// therefore listens on the window during capture, throws away anything
+// that landed on a button or a full-screen overlay, and treats a held
+// drag as a look fallback whenever the pointer is not locked.
+//
+// The Pay N Spray is wired here too: roll onto the pad by the kiosk,
+// press F, hand over $100, and the heat clears and the car comes back
+// whole. The taxi side job's T key lives here as well.
 import * as THREE from 'three';
 import {
   makeGame,
@@ -63,132 +62,134 @@ import { Effects } from './effects.js';
 import { SaveData } from './save.js';
 import { stageShot } from './shots.js';
 
-const game = makeGame();
+const sim = makeGame();
 window.__game = undefined;
 
-const el = (id) => document.getElementById(id);
+const byId = (id) => document.getElementById(id);
 
-// What a Pay N Spray visit costs, and how close the car has to be to the
-// pad for the prompt to appear.
-const GARAGE_PRICE = 100;
-const GARAGE_REACH = 7;
+// What one Pay N Spray visit charges, and how near the pad the car has
+// to sit before the prompt shows up.
+const SPRAY_COST = 100;
+const PAD_RADIUS = 7;
 
 // --- Pay N Spray ----------------------------------------------------------
 
-// True when Cole is driving and sitting on the Pay N Spray pad.
-function carOnSprayPad() {
-  const cole = game.player;
-  const pad = game.markers.spray;
-  return !!cole.car && !!pad && dist2D(cole.pos.x, cole.pos.z, pad.x, pad.z) < GARAGE_REACH;
+// True while Cole is behind the wheel and parked on the spray pad.
+function carOnPad() {
+  const hero = sim.player;
+  const padPos = sim.markers.spray;
+  if (!hero.car || !padPos) return false;
+  return dist2D(hero.pos.x, hero.pos.z, padPos.x, padPos.z) < PAD_RADIUS;
 }
 
-function runSprayService() {
-  const cole = game.player;
-  if (!cole.car || !carOnSprayPad()) return;
-  const ride = cole.car;
-  if (game.wanted === 0 && ride.health >= ride.maxHealth) {
-    game.hud.showMessage('No heat and the car is clean — nothing to pay for.');
+function visitSprayShop() {
+  const hero = sim.player;
+  if (!hero.car || !carOnPad()) return;
+  const car = hero.car;
+  if (sim.wanted === 0 && car.health >= car.maxHealth) {
+    sim.hud.showMessage('No heat and the car is clean — nothing to pay for.');
     return;
   }
-  if (game.cash < GARAGE_PRICE) {
-    game.hud.showMessage(`Not enough cash — Pay N Spray costs $${GARAGE_PRICE}.`);
-    game.audio.click();
+  if (sim.cash < SPRAY_COST) {
+    sim.hud.showMessage(`Not enough cash — Pay N Spray costs $${SPRAY_COST}.`);
+    sim.audio.click();
     return;
   }
-  game.cash -= GARAGE_PRICE;
-  game.police.clearWanted(game);
-  ride.health = ride.maxHealth;
-  game.audio.cash();
-  game.hud.showMessage(`Pay N Spray: heat cleared, car fully repaired. -$${GARAGE_PRICE}.`);
+  sim.cash -= SPRAY_COST;
+  sim.police.clearWanted(sim);
+  car.health = car.maxHealth;
+  sim.audio.cash();
+  sim.hud.showMessage(`Pay N Spray: heat cleared, car fully repaired. -$${SPRAY_COST}.`);
 }
 
 // --- input ----------------------------------------------------------------
 
-function toggleCarEntry() {
-  const cole = game.player;
-  if (cole.car) {
-    exitCar(game);
+function tryEnterOrExitCar() {
+  const hero = sim.player;
+  if (hero.car) {
+    exitCar(sim);
     return;
   }
-  const ride = nearestCar(game, cole.pos, STEAL_REACH);
-  if (!ride) return;
-  enterCar(game, ride);
-  game.stats.carsStolen++;
-  if (!ride.stolen) {
-    ride.stolen = true;
-    game.police.addWanted(game, 1, `You stole the ${ride.name}!`);
-    scarePedestrians(game, cole.pos.x, cole.pos.z, 20);
-  }
+  const car = nearestCar(sim, hero.pos, STEAL_REACH);
+  if (!car) return;
+  enterCar(sim, car);
+  sim.stats.carsStolen++;
+  if (car.stolen) return;
+  car.stolen = true;
+  sim.police.addWanted(sim, 1, `You stole the ${car.name}!`);
+  scarePedestrians(sim, hero.pos.x, hero.pos.z, 20);
 }
 
-function cycleWeapon() {
-  if (game.mode !== 'playing' || game.player.car) return;
-  const cole = game.player;
-  cole.weapon = cole.weapon === 'fists' ? 'pistol' : 'fists';
-  game.hud.showMessage(cole.weapon === 'pistol' ? 'Pistol ready.' : 'Fists ready.');
-  game.audio.click();
+function swapWeapon() {
+  if (sim.mode !== 'playing' || sim.player.car) return;
+  const hero = sim.player;
+  hero.weapon = hero.weapon === 'fists' ? 'pistol' : 'fists';
+  sim.hud.showMessage(hero.weapon === 'pistol' ? 'Pistol ready.' : 'Fists ready.');
+  sim.audio.click();
 }
 
-function rightCar() {
-  if (game.mode !== 'playing' || !game.player.car) return;
-  const ride = game.player.car;
-  ride.speed = 0;
-  ride.mesh.rotation.set(0, ride.heading, 0);
-  game.hud.showMessage('Car righted.');
+function uprightCar() {
+  if (sim.mode !== 'playing' || !sim.player.car) return;
+  const car = sim.player.car;
+  car.speed = 0;
+  car.mesh.rotation.set(0, car.heading, 0);
+  sim.hud.showMessage('Car righted.');
 }
 
-function flipPause() {
-  if (game.mode === 'playing') {
-    game.mode = 'paused';
-    el('pause-menu').classList.remove('hidden');
+function togglePause() {
+  if (sim.mode === 'playing') {
+    sim.mode = 'paused';
+    byId('pause-menu').classList.remove('hidden');
     document.exitPointerLock?.();
-  } else if (game.mode === 'paused') {
-    game.mode = 'playing';
-    el('pause-menu').classList.add('hidden');
+    return;
   }
+  if (sim.mode !== 'paused') return;
+  sim.mode = 'playing';
+  byId('pause-menu').classList.add('hidden');
 }
 
-function handleKeyDown(e) {
-  const code = e.code;
-  if (code === 'Space') e.preventDefault();
-  game.input.keys.add(code);
+function onKeyDown(e) {
+  const key = e.code;
+  if (key === 'Space') e.preventDefault();
+  sim.input.keys.add(key);
   if (e.repeat) return;
-  switch (code) {
-    case 'KeyM':
-      game.audio.setMuted(!game.audio.muted);
-      game.hud.showMessage(game.audio.muted ? 'Sound muted.' : 'Sound on.');
-      break;
-    case 'KeyQ':
-      cycleWeapon();
-      break;
-    case 'KeyE':
-      if (game.mode === 'playing') toggleCarEntry();
-      break;
-    case 'KeyF':
-      if (game.mode === 'playing') runSprayService();
-      break;
-    case 'KeyT':
-      if (game.mode === 'playing') game.missions.pickupFare(game);
-      break;
-    case 'KeyR':
-      rightCar();
-      break;
-    case 'Escape':
-    case 'KeyP':
-      if (game.mode === 'playing' || game.mode === 'paused') flipPause();
-      break;
-    default:
-      break;
+  if (key === 'KeyM') {
+    sim.audio.setMuted(!sim.audio.muted);
+    sim.hud.showMessage(sim.audio.muted ? 'Sound muted.' : 'Sound on.');
+    return;
+  }
+  if (key === 'KeyQ') {
+    swapWeapon();
+    return;
+  }
+  if (key === 'KeyE' && sim.mode === 'playing') {
+    tryEnterOrExitCar();
+    return;
+  }
+  if (key === 'KeyF' && sim.mode === 'playing') {
+    visitSprayShop();
+    return;
+  }
+  if (key === 'KeyT' && sim.mode === 'playing') {
+    sim.missions.pickupFare(sim);
+    return;
+  }
+  if (key === 'KeyR') {
+    uprightCar();
+    return;
+  }
+  if (key === 'Escape' || key === 'KeyP') {
+    if (sim.mode === 'playing' || sim.mode === 'paused') togglePause();
   }
 }
 
-function wireKeyboard() {
-  window.addEventListener('keydown', handleKeyDown);
-  window.addEventListener('keyup', (e) => game.input.keys.delete(e.code));
-  window.addEventListener('blur', () => game.input.keys.clear());
+function bindKeys() {
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', (e) => sim.input.keys.delete(e.code));
+  window.addEventListener('blur', () => sim.input.keys.clear());
 
-  const canvas = el('scene');
-  let dragging = false;
+  const view = byId('scene');
+  let held = false;
   // Capture phase on the window: the click is seen no matter which layer
   // it landed on, and menu clicks are filtered out by target instead of
   // by which element happened to be on top.
@@ -196,200 +197,198 @@ function wireKeyboard() {
     'mousedown',
     (e) => {
       if (e.target && e.target.closest && e.target.closest('button, .screen')) return;
-      if (game.mode !== 'playing') return;
-      dragging = true;
-      const lock = canvas.requestPointerLock?.();
+      if (sim.mode !== 'playing') return;
+      held = true;
+      const lock = view.requestPointerLock?.();
       if (lock && lock.catch) lock.catch(() => {});
-      if (e.button === 0) game.combat.attack(game);
+      if (e.button === 0) sim.combat.attack(sim);
     },
     true,
   );
   window.addEventListener('mouseup', () => {
-    dragging = false;
+    held = false;
   });
   document.addEventListener('mousemove', (e) => {
-    if (document.pointerLockElement === canvas) {
-      game.input.mouseDX += e.movementX;
-      game.input.mouseDY += e.movementY;
-    } else if (dragging && game.mode === 'playing') {
+    if (document.pointerLockElement === view) {
+      sim.input.mouseDX += e.movementX;
+      sim.input.mouseDY += e.movementY;
+    } else if (held && sim.mode === 'playing') {
       // Drag-look fallback: works with no pointer lock at all.
-      game.input.mouseDX += e.movementX;
-      game.input.mouseDY += e.movementY;
+      sim.input.mouseDX += e.movementX;
+      sim.input.mouseDY += e.movementY;
     }
   });
   document.addEventListener('pointerlockchange', () => {
-    if (document.pointerLockElement !== canvas) dragging = false;
+    if (document.pointerLockElement !== view) held = false;
   });
-  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  view.addEventListener('contextmenu', (e) => e.preventDefault());
 }
 
 // --- menus ----------------------------------------------------------------
 
-function wireButtons() {
-  const clickSound = () => game.audio.click();
-  const showContinue = () => {
-    if (game.save.load()) el('btn-continue').classList.remove('hidden');
+function bindMenus() {
+  const tap = () => sim.audio.click();
+  const showResume = () => {
+    if (sim.save.load()) byId('btn-continue').classList.remove('hidden');
   };
-  const begin = (index, fromSave) => () => {
-    game.audio.ensure();
-    clickSound();
+  const starter = (index, fromSave) => () => {
+    sim.audio.ensure();
+    tap();
     startRun(index, fromSave);
   };
-  const actions = [
-    ['btn-start', begin(0, false)],
-    ['btn-continue', begin(null, true)],
+  const wiring = [
+    ['btn-start', starter(0, false)],
+    ['btn-continue', starter(null, true)],
     ['btn-resume', () => {
-      clickSound();
-      flipPause();
+      tap();
+      togglePause();
     }],
     ['btn-restart-mission', () => {
-      clickSound();
-      el('pause-menu').classList.add('hidden');
-      game.missions.startMission(game, game.missionIndex, false);
-      game.mode = 'playing';
-      game.hud.showMessage('Mission restarted.');
+      tap();
+      byId('pause-menu').classList.add('hidden');
+      sim.missions.startMission(sim, sim.missionIndex, false);
+      sim.mode = 'playing';
+      sim.hud.showMessage('Mission restarted.');
     }],
     ['btn-save', () => {
-      const ok = game.save.save(game);
-      el('pause-save-note').textContent = ok ? 'Saved.' : 'Save failed (browser storage unavailable).';
+      const ok = sim.save.save(sim);
+      byId('pause-save-note').textContent = ok ? 'Saved.' : 'Save failed (browser storage unavailable).';
     }],
     ['btn-quit-title', () => {
-      clickSound();
-      game.save.save(game);
-      el('pause-menu').classList.add('hidden');
-      game.mode = 'title';
-      el('title-screen').classList.remove('hidden');
-      game.hud.hide();
-      showContinue();
+      tap();
+      sim.save.save(sim);
+      byId('pause-menu').classList.add('hidden');
+      sim.mode = 'title';
+      byId('title-screen').classList.remove('hidden');
+      sim.hud.hide();
+      showResume();
     }],
     ['btn-mission-ok', () => {
-      clickSound();
-      el('mission-panel').classList.add('hidden');
-      game.mode = 'playing';
-      game.missions.startMission(game, game.missionIndex, true);
+      tap();
+      byId('mission-panel').classList.add('hidden');
+      sim.mode = 'playing';
+      sim.missions.startMission(sim, sim.missionIndex, true);
     }],
     ['btn-busted', () => {
-      clickSound();
-      game.missions.respawn(game);
+      tap();
+      sim.missions.respawn(sim);
     }],
     ['btn-wasted', () => {
-      clickSound();
-      game.missions.respawn(game);
+      tap();
+      sim.missions.respawn(sim);
     }],
     ['btn-ending', () => {
-      clickSound();
-      el('ending-screen').classList.add('hidden');
-      game.mode = 'playing';
-      game.missions.setFreeRoam(game);
+      tap();
+      byId('ending-screen').classList.add('hidden');
+      sim.mode = 'playing';
+      sim.missions.setFreeRoam(sim);
     }],
     ['btn-briefing', () => {
-      clickSound();
-      el('briefing').classList.add('hidden');
-      game.mode = 'playing';
+      tap();
+      byId('briefing').classList.add('hidden');
+      sim.mode = 'playing';
     }],
   ];
-  showContinue();
-  for (const [id, fn] of actions) el(id).addEventListener('click', fn);
+  showResume();
+  for (let k = 0; k < wiring.length; k++) byId(wiring[k][0]).addEventListener('click', wiring[k][1]);
 }
 
 // --- world assembly -------------------------------------------------------
 
-function createRenderer() {
-  const canvas = el('scene');
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: !navigator.webdriver });
+function setupRenderer() {
+  const view = byId('scene');
+  const renderer = new THREE.WebGLRenderer({ canvas: view, antialias: !navigator.webdriver });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   Object.assign(renderer.shadowMap, { enabled: true, type: THREE.PCFSoftShadowMap });
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.35;
-  game.renderer = renderer;
-  game.scene = new THREE.Scene();
-  game.camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 1500);
-  game.camera.position.set(-40, 8, -14);
+  sim.renderer = renderer;
+  sim.scene = new THREE.Scene();
+  sim.camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 1500);
+  sim.camera.position.set(-40, 8, -14);
   window.addEventListener('resize', () => {
-    game.camera.aspect = window.innerWidth / window.innerHeight;
-    game.camera.updateProjectionMatrix();
-    game.renderer.setSize(window.innerWidth, window.innerHeight);
+    sim.camera.aspect = window.innerWidth / window.innerHeight;
+    sim.camera.updateProjectionMatrix();
+    sim.renderer.setSize(window.innerWidth, window.innerHeight);
   });
 }
 
 // The city ships dusk-grade light; lift it into a bright midday sun so the
 // streets read as a sun-soaked modern city instead of an evening haze.
-function brightenCity() {
-  if (game.sun) game.sun.intensity = 3.6;
-  const fills = [
-    new THREE.HemisphereLight(0xbfd9ff, 0x8a7a5a, 1.5),
-    new THREE.AmbientLight(0xfff2dd, 0.35),
-  ];
-  for (const light of fills) game.scene.add(light);
-  game.scene.fog = new THREE.Fog(0x9fc3e8, 220, 720);
+function liftDaylight() {
+  if (sim.sun) sim.sun.intensity = 3.6;
+  const sky = new THREE.HemisphereLight(0xbfd9ff, 0x8a7a5a, 1.5);
+  const fill = new THREE.AmbientLight(0xfff2dd, 0.35);
+  sim.scene.add(sky);
+  sim.scene.add(fill);
+  sim.scene.fog = new THREE.Fog(0x9fc3e8, 220, 720);
 }
 
-function buildWorld() {
-  createRenderer();
-  buildCity(game);
-  brightenCity();
-  createPlayer(game);
-  spawnParkedCars(game);
-  spawnTraffic(game, 14);
-  spawnPedestrians(game, 24);
-  game.audio = new AudioEngine();
-  game.hud = new HUD(game);
-  game.fx = new Effects(game);
-  game.police = new Police(game);
-  game.combat = new Combat(game);
-  game.missions = new Missions(game);
-  game.save = new SaveData();
-  wireKeyboard();
-  wireButtons();
-  game.camera.position.set(-60, 26, -60);
-  game.camera.lookAt(0, 4, 0);
+function assembleWorld() {
+  setupRenderer();
+  buildCity(sim);
+  liftDaylight();
+  createPlayer(sim);
+  spawnParkedCars(sim);
+  spawnTraffic(sim, 14);
+  spawnPedestrians(sim, 24);
+  sim.audio = new AudioEngine();
+  sim.hud = new HUD(sim);
+  sim.fx = new Effects(sim);
+  sim.police = new Police(sim);
+  sim.combat = new Combat(sim);
+  sim.missions = new Missions(sim);
+  sim.save = new SaveData();
+  bindKeys();
+  bindMenus();
+  sim.camera.position.set(-60, 26, -60);
+  sim.camera.lookAt(0, 4, 0);
 }
 
 // --- starting and continuing ----------------------------------------------
 
 function startRun(missionIndex, fromSave) {
-  el('title-screen').classList.add('hidden');
-  game.hud.show();
-  let startMission = missionIndex ?? 0;
-  let resumeStep = 0;
-  let resumeNote = '';
+  byId('title-screen').classList.add('hidden');
+  sim.hud.show();
+  let jobNo = missionIndex ?? 0;
+  let beatNo = 0;
+  let note = '';
   if (fromSave) {
-    const data = game.save.load();
-    if (data) {
-      const resumed = game.save.apply(game, data);
-      startMission = resumed.index;
-      resumeStep = resumed.step;
-      resumeNote = resumed.note || '';
+    const saved = sim.save.load();
+    if (saved) {
+      const restored = sim.save.apply(sim, saved);
+      jobNo = restored.index;
+      beatNo = restored.step;
+      note = restored.note || '';
     }
   } else {
-    game.cash = 0;
-    const cole = game.player;
-    cole.pos.set(-60, 0, -34);
-    cole.heading = 0;
-    cole.health = 100;
-    game.wanted = 0;
+    sim.cash = 0;
+    const hero = sim.player;
+    hero.pos.set(-60, 0, -34);
+    hero.heading = 0;
+    hero.health = 100;
+    sim.wanted = 0;
   }
-  game.mode = 'playing';
-  game.missions.startMission(game, startMission, true, resumeStep);
-  snapCameraBehind();
-  const greeting = resumeNote ? `Welcome back, Cole. ${resumeNote}` : 'Welcome to Neon Harbor, Cole.';
-  game.hud.showMessage(greeting);
+  sim.mode = 'playing';
+  sim.missions.startMission(sim, jobNo, true, beatNo);
+  placeCameraBehind();
+  sim.hud.showMessage(note ? `Welcome back, Cole. ${note}` : 'Welcome to Neon Harbor, Cole.');
 }
 
 // Put the camera on a clear spot behind Cole right away. The rig lerps
 // from wherever the camera currently is; after a Continue that used to be
 // the title orbit on the far side of the city, and the lerp path cut
 // straight through buildings. Starting from a legal spot fixes both.
-function snapCameraBehind() {
-  const cole = game.player;
-  const back = cole.heading + Math.PI;
-  const spotX = cole.pos.x + Math.sin(back) * 8;
-  const spotZ = cole.pos.z + Math.cos(back) * 8;
-  const clear = collideCircle(game, spotX, spotZ, 1.2);
-  game.camera.position.set(clear.x, 4.5, clear.z);
-  game.camera.lookAt(cole.pos.x, 1.7, cole.pos.z);
+function placeCameraBehind() {
+  const hero = sim.player;
+  const behind = hero.heading + Math.PI;
+  const bx = hero.pos.x + Math.sin(behind) * 8;
+  const bz = hero.pos.z + Math.cos(behind) * 8;
+  const open = collideCircle(sim, bx, bz, 1.2);
+  sim.camera.position.set(open.x, 4.5, open.z);
+  sim.camera.lookAt(hero.pos.x, 1.7, hero.pos.z);
 }
 
 // --- camera keep-out -------------------------------------------------------
@@ -398,266 +397,263 @@ function snapCameraBehind() {
 // target is legal. Push it back out: first horizontally out of any building
 // footprint, then along the sight line from the player — walk from the
 // player toward the camera and stop just before the first blocked sample.
-function keepCameraClear() {
-  const cam = game.camera;
-  const pushed = collideCircle(game, cam.position.x, cam.position.z, 1.2);
+function enforceCameraClearance() {
+  const cam = sim.camera;
+  const pushed = collideCircle(sim, cam.position.x, cam.position.z, 1.2);
   cam.position.x = pushed.x;
   cam.position.z = pushed.z;
-  const cole = game.player;
-  const eye = new THREE.Vector3(cole.pos.x, cole.pos.y + 1.7, cole.pos.z);
-  const toCam = new THREE.Vector3().subVectors(cam.position, eye);
-  const len = toCam.length();
-  const tooClose = len < 0.5;
-  if (tooClose) return;
-  const step = toCam.clone().multiplyScalar(1 / len);
-  let lastClear = 0;
-  const fractions = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
-  for (let i = 0; i < fractions.length; i++) {
-    const probe = eye.clone().addScaledVector(step, len * fractions[i]);
-    const blocked = collideCircle(game, probe.x, probe.z, 0.5).hit;
-    if (blocked) break;
-    lastClear = i + 1;
+  const hero = sim.player;
+  const origin = new THREE.Vector3(hero.pos.x, hero.pos.y + 1.7, hero.pos.z);
+  const offset = new THREE.Vector3().subVectors(cam.position, origin);
+  const span = offset.length();
+  if (span < 0.5) return;
+  const dir = offset.clone().multiplyScalar(1 / span);
+  const samples = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+  let clearTo = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const test = origin.clone().addScaledVector(dir, span * samples[i]);
+    if (collideCircle(sim, test.x, test.z, 0.5).hit) break;
+    clearTo = i + 1;
   }
-  if (lastClear < fractions.length) {
-    const pull = Math.max(1.5, (len * lastClear) / fractions.length - 0.6);
-    cam.position.copy(eye).addScaledVector(step, pull);
+  if (clearTo < samples.length) {
+    const draw = Math.max(1.5, (span * clearTo) / samples.length - 0.6);
+    cam.position.copy(origin).addScaledVector(dir, draw);
   }
   if (cam.position.y < 1.5) cam.position.y = 1.5;
 }
 
 // --- per-frame update -------------------------------------------------------
 
-function animateScenery(dt) {
-  if (game.sea) game.sea.position.y = 0.12 + Math.sin(game.time * 0.7) * 0.05;
-  if (game.ferris) game.ferris.children[0].rotation.z += dt * 0.15;
-  const beacon = game.beacon;
-  if (beacon && beacon.visible) {
-    beacon.children[1].scale.setScalar(1 + Math.sin(game.time * 4) * 0.15);
-    beacon.children[0].material.opacity = 0.22 + Math.sin(game.time * 4) * 0.08;
-  }
+function tickScenery(dt) {
+  if (sim.sea) sim.sea.position.y = 0.12 + Math.sin(sim.time * 0.7) * 0.05;
+  if (sim.ferris) sim.ferris.children[0].rotation.z += dt * 0.15;
+  const beacon = sim.beacon;
+  if (!beacon || !beacon.visible) return;
+  beacon.children[1].scale.setScalar(1 + Math.sin(sim.time * 4) * 0.15);
+  beacon.children[0].material.opacity = 0.22 + Math.sin(sim.time * 4) * 0.08;
 }
 
 // The interact prompt: steal on foot, Pay N Spray while driving on the
 // pad, taxi pickup next to a waiting fare. One prompt at a time, in that
 // order of priority.
-function promptText() {
-  const cole = game.player;
-  const taxi = game.taxi;
-  const fareNear =
-    taxi.phase === 'wait' &&
-    taxi.client &&
-    dist2D(cole.pos.x, cole.pos.z, taxi.client.pos.x, taxi.client.pos.z) < 4;
-  if (!cole.car) {
-    const ride = nearestCar(game, cole.pos, STEAL_REACH);
-    if (ride) return `Press E — steal the ${ride.name}`;
+function currentPrompt() {
+  const hero = sim.player;
+  const taxi = sim.taxi;
+  let fareNear = false;
+  if (taxi.phase === 'wait' && taxi.client) {
+    fareNear = dist2D(hero.pos.x, hero.pos.z, taxi.client.pos.x, taxi.client.pos.z) < 4;
+  }
+  if (!hero.car) {
+    const car = nearestCar(sim, hero.pos, STEAL_REACH);
+    if (car) return `Press E — steal the ${car.name}`;
     if (fareNear) return 'Press T — pick up the fare';
     return null;
   }
-  if (carOnSprayPad()) return `Press F — Pay N Spray ($${GARAGE_PRICE}): clear heat + repair`;
+  if (carOnPad()) return `Press F — Pay N Spray ($${SPRAY_COST}): clear heat + repair`;
   if (fareNear) return 'Press T — pick up the fare';
   return null;
 }
 
-function updateInteractPrompt() {
-  const prompt = el('interact');
-  const text = promptText();
-  if (text) {
-    prompt.textContent = text;
-    prompt.classList.remove('hidden');
-  } else {
-    prompt.classList.add('hidden');
-  }
-}
-
-function orbitTitleCamera() {
-  const a = game.time * 0.03;
-  game.camera.position.set(Math.sin(a) * 120, 42, Math.cos(a) * 120);
-  game.camera.lookAt(0, 6, 0);
-}
-
-function frame(dt) {
-  game.time += dt;
-  animateScenery(dt);
-  if (game.mode === 'title') {
-    orbitTitleCamera();
-    updateTraffic(game, dt);
-    updatePedestrians(game, dt);
+function refreshPrompt() {
+  const hint = byId('interact');
+  const line = currentPrompt();
+  if (!line) {
+    hint.classList.add('hidden');
     return;
   }
-  if (game.mode !== 'playing') {
-    return;
-  }
-  updatePlayer(game, dt);
-  if (game.player.car) drivePlayerCar(game, dt);
-  updateTraffic(game, dt);
-  updatePedestrians(game, dt);
-  game.police.update(game, dt);
-  game.combat.update(game, dt);
-  game.missions.update(game, dt);
-  game.missions.updateTaxi(game, dt);
-  game.fx.update(dt);
-  game.hud.update(game, dt);
-  updateInteractPrompt();
-  keepCameraClear();
+  hint.textContent = line;
+  hint.classList.remove('hidden');
 }
 
-function drawFrame() {
-  if (game._render !== false) game.renderer.render(game.scene, game.camera);
+function spinTitleCamera() {
+  const a = sim.time * 0.03;
+  sim.camera.position.set(Math.sin(a) * 120, 42, Math.cos(a) * 120);
+  sim.camera.lookAt(0, 6, 0);
+}
+
+function tick(dt) {
+  sim.time += dt;
+  tickScenery(dt);
+  if (sim.mode === 'title') {
+    spinTitleCamera();
+    updateTraffic(sim, dt);
+    updatePedestrians(sim, dt);
+    return;
+  }
+  if (sim.mode !== 'playing') {
+    return;
+  }
+  updatePlayer(sim, dt);
+  if (sim.player.car) drivePlayerCar(sim, dt);
+  updateTraffic(sim, dt);
+  updatePedestrians(sim, dt);
+  sim.police.update(sim, dt);
+  sim.combat.update(sim, dt);
+  sim.missions.update(sim, dt);
+  sim.missions.updateTaxi(sim, dt);
+  sim.fx.update(dt);
+  sim.hud.update(sim, dt);
+  refreshPrompt();
+  enforceCameraClearance();
+}
+
+function renderScene() {
+  if (sim._render !== false) sim.renderer.render(sim.scene, sim.camera);
 }
 
 // --- debug handle and main loop --------------------------------------------
 
-function exposeTestHandle() {
-  const cole = game.player;
+function installTestHook() {
+  const hero = sim.player;
   // Read-only snapshots for tests, plus the handful of actions a test
   // needs (teleport, start a mission, step the loop, press a key).
-  const handle = {
+  const hook = {
     get mode() {
-      return game.mode;
+      return sim.mode;
     },
     get wanted() {
-      return game.wanted;
+      return sim.wanted;
     },
     get cash() {
-      return game.cash;
+      return sim.cash;
     },
     get mission() {
-      return game.missionIndex;
+      return sim.missionIndex;
     },
     get missionStep() {
-      return game.missionStep;
+      return sim.missionStep;
     },
     get driving() {
-      return !!cole.car;
+      return !!hero.car;
     },
     get health() {
-      return cole.health;
+      return hero.health;
     },
     get carHealth() {
-      return cole.car ? cole.car.health : null;
+      return hero.car ? hero.car.health : null;
     },
     get ammo() {
-      return cole.ammo;
+      return hero.ammo;
     },
     get weapon() {
-      return cole.weapon;
+      return hero.weapon;
     },
     get pos() {
-      return { x: cole.pos.x, y: cole.pos.y, z: cole.pos.z };
+      return { x: hero.pos.x, y: hero.pos.y, z: hero.pos.z };
     },
     get cars() {
-      return game.cars.length;
+      return sim.cars.length;
     },
     get police() {
-      return game.policeCars.length + game.officers.length;
+      return sim.policeCars.length + sim.officers.length;
     },
     get policeCars() {
-      return game.policeCars.length;
+      return sim.policeCars.length;
     },
     get peds() {
-      return game.peds.length;
+      return sim.peds.length;
     },
     get enemies() {
-      return game.enemies.length;
+      return sim.enemies.length;
     },
     get carName() {
-      return cole.car ? cole.car.name : null;
+      return hero.car ? hero.car.name : null;
     },
     get taxiPhase() {
-      return game.taxi.phase;
+      return sim.taxi.phase;
     },
     get taxiFare() {
-      return game.taxi.fare;
+      return sim.taxi.fare;
     },
     get cameraLocked() {
-      return document.pointerLockElement === el('scene');
+      return document.pointerLockElement === byId('scene');
     },
     teleport(x, z) {
-      cole.pos.set(x, 0, z);
-      if (cole.car) cole.car.pos.set(x, 0, z);
+      hero.pos.set(x, 0, z);
+      if (hero.car) hero.car.pos.set(x, 0, z);
     },
     startMission(i) {
-      game.missions.startMission(game, i, false);
-      game.mode = 'playing';
+      sim.missions.startMission(sim, i, false);
+      sim.mode = 'playing';
     },
     step(dt) {
-      frame(dt || 0.05);
-      drawFrame();
+      tick(dt || 0.05);
+      renderScene();
     },
     setRender(on) {
-      game.renderEnabled = !!on;
-      game._render = !!on;
+      sim.renderEnabled = !!on;
+      sim._render = !!on;
     },
     pressKey(code, down) {
-      if (down) game.input.keys.add(code);
-      else game.input.keys.delete(code);
+      if (down) sim.input.keys.add(code);
+      else sim.input.keys.delete(code);
     },
     // Test-only hook: hurt Cole through the real damage path (invuln,
     // vignette, wasted flow) without staging an enemy.
     hurt(amount) {
-      damagePlayer(game, amount, 'test');
+      damagePlayer(sim, amount, 'test');
     },
-    G: game,
+    G: sim,
   };
-  window.__game = handle;
+  window.__game = hook;
 }
 
-function launch() {
-  buildWorld();
-  exposeTestHandle();
+function boot() {
+  assembleWorld();
+  installTestHook();
   window.__shotReady = false;
-  const params = new URLSearchParams(location.search);
-  const shot = params.get('shot');
-  if (shot) stageShot(game, shot);
+  const query = new URLSearchParams(location.search);
+  const snap = query.get('shot');
+  if (snap) stageShot(sim, snap);
   // Fixed-step simulation: the world advances in 50ms slices of wall-clock
   // time, however fast or slow frames arrive, so a slow renderer (software
   // GL in a test browser) costs frames, never slow motion. The slice stays
   // small so a fast car cannot tunnel through a wall on one long step.
   // Rendering is still skipped on slow frames to stay responsive.
-  const STEP = 0.05;
-  const MAX_STEPS = 20;
-  let carry = 0;
-  let last = performance.now();
-  let skipped = 0;
-  let framesSinceDraw = 0;
-  let meanMs = 16;
+  const SLICE = 0.05;
+  const MAX_SLICES = 20;
+  let acc = 0;
+  let prev = performance.now();
+  let dropped = 0;
+  let sinceDraw = 0;
+  let avgMs = 16;
   function loop() {
     requestAnimationFrame(loop);
     const now = performance.now();
-    let budget = (now - last) / 1000;
-    last = now;
-    if (budget > 1) budget = 1;
-    carry += budget;
-    let steps = 0;
+    let allowance = (now - prev) / 1000;
+    prev = now;
+    if (allowance > 1) allowance = 1;
+    acc += allowance;
+    let slices = 0;
     try {
-      while (carry >= STEP && steps < MAX_STEPS) {
-        frame(STEP);
-        carry -= STEP;
-        steps++;
+      while (acc >= SLICE && slices < MAX_SLICES) {
+        tick(SLICE);
+        acc -= SLICE;
+        slices++;
       }
     } catch (err) {
       console.error('update error', err);
-      carry = 0;
+      acc = 0;
     }
-    if (steps === MAX_STEPS) carry = 0;
-    framesSinceDraw++;
-    const wantDraw = framesSinceDraw > skipped && game.renderEnabled !== false;
-    game._render = wantDraw;
-    if (!wantDraw) return;
-    framesSinceDraw = 0;
-    const started = performance.now();
+    if (slices === MAX_SLICES) acc = 0;
+    sinceDraw++;
+    const drawNow = sinceDraw > dropped && sim.renderEnabled !== false;
+    sim._render = drawNow;
+    if (!drawNow) return;
+    sinceDraw = 0;
+    const t0 = performance.now();
     try {
-      drawFrame();
+      renderScene();
     } catch (err) {
       console.error('render error', err);
     }
-    const spent = performance.now() - started;
-    meanMs = meanMs * 0.8 + spent * 0.2;
-    if (spent > 200) skipped = Math.max(skipped, Math.min(6, Math.round(spent / 150)));
-    else if (meanMs > 70 && skipped < 6) skipped++;
-    else if (meanMs < 30 && skipped > 0) skipped--;
+    const cost = performance.now() - t0;
+    avgMs = avgMs * 0.8 + cost * 0.2;
+    if (cost > 200) dropped = Math.max(dropped, Math.min(6, Math.round(cost / 150)));
+    else if (avgMs > 70 && dropped < 6) dropped++;
+    else if (avgMs < 30 && dropped > 0) dropped--;
   }
   loop();
 }
 
-launch();
+boot();

@@ -1,11 +1,13 @@
-// Neon Harbor — the wanted system. Stars run 0–5; police cars chase and
-// ram, foot officers run Cole down and grab him. Two lessons from
-// playtesting drive the numbers here. First, heat has to feel like a
-// pursuit rather than a flicker: a star used to die about fourteen seconds
-// after Cole slipped out of sight, before any cruiser had even arrived.
-// Second, the response has to be visible — units spawn close enough to
-// see and hear, on a road, heading in. So a star now only drops after a
-// full minute genuinely unseen, and any fresh crime restarts that clock.
+// Neon Harbor — the wanted system.
+//
+// Stars run 0–5; police cars chase and ram, foot officers run Cole down
+// and grab him. Two lessons from playtesting drive the numbers here.
+// First, heat has to feel like a pursuit rather than a flicker: a star
+// used to die about fourteen seconds after Cole slipped out of sight,
+// before any cruiser had even arrived. Second, the response has to be
+// visible — units spawn close enough to see and hear, on a road,
+// heading in. So a star now only drops after a full minute genuinely
+// unseen, and any fresh crime restarts that clock.
 import * as THREE from 'three';
 import {
   rand,
@@ -23,23 +25,23 @@ import { damagePlayer } from './player.js';
 // unseen before one star drops, and where fresh units appear. The old
 // spawn band (45–65 m) put the first police car a long drive away; the
 // new band (28–42 m) puts headlights in the mirror.
-const SIGHT_RANGE = 60;
-const UNSEEN_SECONDS = 60;
-const SPAWN_NEAR = 28;
-const SPAWN_FAR = 42;
-const OFFICER_SPAWN_RANGE = 30;
-const GRAB_HOLD_SECONDS = 2.0;
-const SIREN_HEARING = 90;
-const CHASE_CRUISE = 24;
-const RAM_REACH = 4.6;
-const RAM_COOLDOWN = 1.0;
-const GRAB_REACH = 1.7;
-const OFFICER_FOOT_SPEED = 5.6;
-const OFFICER_CHASE_SPEED = 6.4;
-const SPAWN_TRIES = 12;
+const WITNESS_RANGE = 60;
+const COOLOFF_SECONDS = 60;
+const SPAWN_MIN = 28;
+const SPAWN_MAX = 42;
+const OFFICER_RANGE = 30;
+const GRAB_SECONDS = 2.0;
+const SIREN_RANGE = 90;
+const CHASE_SPEED = 24;
+const RAM_RANGE = 4.6;
+const RAM_WAIT = 1.0;
+const GRAB_RANGE = 1.7;
+const OFFICER_WALK = 5.6;
+const OFFICER_RUN = 6.4;
+const SPAWN_ATTEMPTS = 12;
 
 // Small helper: a box mesh placed in one call.
-function cuboid(width, height, depth, mat, x, y, z) {
+function boxPiece(width, height, depth, mat, x, y, z) {
   const piece = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), mat);
   piece.position.set(x, y, z);
   return piece;
@@ -48,312 +50,316 @@ function cuboid(width, height, depth, mat, x, y, z) {
 export class Police {
   constructor(game) {
     this.game = game;
-    this.grabTime = 0;
-    this.spawnWait = 0;
+    this.holdClock = 0;
+    this.spawnClock = 0;
   }
 
-  update(game, dt) {
-    this.coolDown(game, dt);
-    this.staffStreets(game, dt);
-    this.runSiren(game);
-    this.runChase(game, dt);
-    this.runOfficers(game, dt);
+  update(w, dt) {
+    this.coolDown(w, dt);
+    this.staffStreets(w, dt);
+    this.runSiren(w);
+    this.runChase(w, dt);
+    this.runOfficers(w, dt);
   }
 
-  addWanted(game, stars, message) {
+  addWanted(w, stars, message) {
     if (stars <= 0) return;
-    const before = game.wanted;
-    game.wanted = clamp(game.wanted + stars, 0, 5);
+    const before = w.wanted;
+    w.wanted = clamp(w.wanted + stars, 0, 5);
     // Any fresh crime restarts the unseen clock: stealing a second car
     // while the heat is already fading must not let the star drop anyway.
-    game.heatTimer = 0;
-    game.stats.crimes++;
-    if (game.wanted > before) {
-      if (message) game.hud.showMessage(message);
-      game.hud.showMessage(`Wanted level ${game.wanted} — Harbor PD is on you.`);
+    w.heatTimer = 0;
+    w.stats.crimes++;
+    if (w.wanted <= before) return;
+    if (message) w.hud.showMessage(message);
+    w.hud.showMessage(`Wanted level ${w.wanted} — Harbor PD is on you.`);
+  }
+
+  clearWanted(w) {
+    w.wanted = 0;
+    w.heatTimer = 0;
+    this.holdClock = 0;
+    this.clearUnits(w);
+  }
+
+  clearUnits(w) {
+    for (let i = 0; i < w.policeCars.length; i++) {
+      const cruiser = w.policeCars[i];
+      w.scene.remove(cruiser.mesh);
+      w.cars = w.cars.filter((c) => c !== cruiser);
     }
+    w.policeCars = [];
+    for (let i = 0; i < w.officers.length; i++) w.scene.remove(w.officers[i].mesh);
+    w.officers = [];
+    this.holdClock = 0;
   }
 
-  clearWanted(game) {
-    game.wanted = 0;
-    game.heatTimer = 0;
-    this.grabTime = 0;
-    this.clearUnits(game);
-  }
-
-  clearUnits(game) {
-    for (const ride of game.policeCars) {
-      game.scene.remove(ride.mesh);
-      game.cars = game.cars.filter((c) => c !== ride);
-    }
-    game.policeCars = [];
-    for (const officer of game.officers) game.scene.remove(officer.mesh);
-    game.officers = [];
-    this.grabTime = 0;
-  }
-
-  coolDown(game, dt) {
-    if (game.wanted <= 0) return;
-    if (this.spotWitness(game)) {
-      game.heatTimer = 0;
+  coolDown(w, dt) {
+    if (w.wanted <= 0) return;
+    if (this.spotWitness(w)) {
+      w.heatTimer = 0;
       return;
     }
-    game.heatTimer += dt;
-    if (game.heatTimer <= UNSEEN_SECONDS) return;
-    game.heatTimer = 0;
-    game.wanted = Math.max(0, game.wanted - 1);
-    if (game.wanted === 0) {
-      this.clearUnits(game);
-      game.hud.showMessage('You lost the cops. Heat is off.');
-    } else {
-      game.hud.showMessage(`Heat dropping — wanted level ${game.wanted}.`);
+    w.heatTimer += dt;
+    if (w.heatTimer <= COOLOFF_SECONDS) return;
+    w.heatTimer = 0;
+    w.wanted = Math.max(0, w.wanted - 1);
+    if (w.wanted > 0) {
+      w.hud.showMessage(`Heat dropping — wanted level ${w.wanted}.`);
+      return;
     }
+    this.clearUnits(w);
+    w.hud.showMessage('You lost the cops. Heat is off.');
   }
 
   // Is any police unit looking straight at Cole right now? Close is not
   // enough — a building between them breaks the sight line, which is what
   // makes hiding behind a block a real way to cool off.
-  spotWitness(game) {
-    const cole = game.player.pos;
-    let nearest = Infinity;
-    let nearestPos = null;
-    const units = [...game.policeCars, ...game.officers];
-    for (const unit of units) {
-      const d = dist2D(unit.pos.x, unit.pos.z, cole.x, cole.z);
-      if (d < nearest) {
-        nearest = d;
-        nearestPos = unit.pos;
-      }
+  spotWitness(w) {
+    const hero = w.player.pos;
+    let closest = Infinity;
+    let closestPos = null;
+    const force = w.policeCars.concat(w.officers);
+    for (let i = 0; i < force.length; i++) {
+      const unit = force[i];
+      const d = dist2D(unit.pos.x, unit.pos.z, hero.x, hero.z);
+      if (d >= closest) continue;
+      closest = d;
+      closestPos = unit.pos;
     }
-    if (!nearestPos || nearest > SIGHT_RANGE) return null;
-    if (segmentBlocked(game, cole.x, cole.z, nearestPos.x, nearestPos.z)) return null;
-    return { dist: nearest, pos: nearestPos };
+    if (!closestPos || closest > WITNESS_RANGE) return null;
+    if (segmentBlocked(w, hero.x, hero.z, closestPos.x, closestPos.z)) return null;
+    return { dist: closest, pos: closestPos };
   }
 
   // One more cruiser than the star count (capped at four) so a chase looks
   // like a chase, and foot officers from two stars up. Spawns are paced so
   // the street fills over a few seconds instead of all at once.
-  staffStreets(game, dt) {
-    const wantCars = game.wanted >= 1 ? Math.min(4, game.wanted + 1) : 0;
-    const wantOfficers = game.wanted >= 2 ? Math.min(4, game.wanted) : 0;
-    this.spawnWait -= dt;
-    if (this.spawnWait > 0) return;
-    if (game.policeCars.length < wantCars) this.sendCruiser(game);
-    else if (game.officers.length < wantOfficers) this.sendOfficer(game);
-    this.spawnWait = game.wanted >= 3 ? 0.7 : 1.2;
+  staffStreets(w, dt) {
+    const carsNeeded = w.wanted >= 1 ? Math.min(4, w.wanted + 1) : 0;
+    const copsNeeded = w.wanted >= 2 ? Math.min(4, w.wanted) : 0;
+    this.spawnClock -= dt;
+    if (this.spawnClock > 0) return;
+    if (w.policeCars.length < carsNeeded) this.sendCruiser(w);
+    else if (w.officers.length < copsNeeded) this.sendOfficer(w);
+    this.spawnClock = w.wanted >= 3 ? 0.7 : 1.2;
   }
 
   // Pick a spawn spot on a road 28–42 m from Cole. The road snap can drag
   // the point in or out, so several angles are tried and the first that
   // really lands in the band wins; the best miss is the fallback.
-  findSpawn(game) {
-    const cole = game.player.pos;
-    let fallback = null;
-    let fallbackScore = Infinity;
-    let attempt = 0;
-    while (attempt < SPAWN_TRIES) {
-      attempt++;
-      const angle = rand(0, Math.PI * 2);
-      const dist = rand(SPAWN_NEAR, SPAWN_FAR);
-      let x = clamp(cole.x + Math.cos(angle) * dist, -230, 230);
-      let z = clamp(cole.z + Math.sin(angle) * dist, -230, 190);
-      x = this.snapAxis(game, x, z, 'x');
-      z = this.snapAxis(game, x, z, 'z');
-      const d = Math.hypot(x - cole.x, z - cole.z);
-      const miss = d < SPAWN_NEAR ? SPAWN_NEAR - d : d > SPAWN_FAR ? d - SPAWN_FAR : 0;
+  findSpawn(w) {
+    const hero = w.player.pos;
+    let bestMiss = null;
+    let bestScore = Infinity;
+    for (let tryNo = 0; tryNo < SPAWN_ATTEMPTS; tryNo++) {
+      const bearing = rand(0, Math.PI * 2);
+      const range = rand(SPAWN_MIN, SPAWN_MAX);
+      let x = clamp(hero.x + Math.cos(bearing) * range, -230, 230);
+      let z = clamp(hero.z + Math.sin(bearing) * range, -230, 190);
+      x = this.snapAxis(w, x, z, 'x');
+      z = this.snapAxis(w, x, z, 'z');
+      const d = Math.hypot(x - hero.x, z - hero.z);
+      let miss = 0;
+      if (d < SPAWN_MIN) miss = SPAWN_MIN - d;
+      else if (d > SPAWN_MAX) miss = d - SPAWN_MAX;
       if (miss === 0) return { x, z };
-      if (miss < fallbackScore) {
-        fallbackScore = miss;
-        fallback = { x, z };
+      if (miss < bestScore) {
+        bestScore = miss;
+        bestMiss = { x, z };
       }
     }
-    return fallback || { x: cole.x + SPAWN_NEAR, z: cole.z };
+    if (bestMiss) return bestMiss;
+    return { x: hero.x + SPAWN_MIN, z: hero.z };
   }
 
   // Move one axis onto its nearest road centre line, but only when that
   // road is the closer of the two — otherwise the snap drags the point
   // sideways along the street instead of onto it.
-  snapAxis(game, x, z, axis) {
-    const closestIn = (list, value) => {
-      let bestLine = list[0];
-      let bestGap = Infinity;
-      for (const line of list) {
-        const gap = Math.abs(value - line);
-        if (gap < bestGap) {
-          bestGap = gap;
-          bestLine = line;
+  snapAxis(w, x, z, axis) {
+    const nearestLine = (list, value) => {
+      let line = list[0];
+      let gap = Infinity;
+      for (let i = 0; i < list.length; i++) {
+        const g = Math.abs(value - list[i]);
+        if (g < gap) {
+          gap = g;
+          line = list[i];
         }
       }
-      return { line: bestLine, gap: bestGap };
+      return { line, gap };
     };
-    const byX = closestIn(game.roads.xs, x);
-    const byZ = closestIn(game.roads.zs, z);
+    const byX = nearestLine(w.roads.xs, x);
+    const byZ = nearestLine(w.roads.zs, z);
     if (axis === 'x') return byX.gap <= byZ.gap ? byX.line : x;
     return byZ.gap < byX.gap ? byZ.line : z;
   }
 
-  sendCruiser(game) {
-    const spot = this.findSpawn(game);
-    const ride = createCar(game, {
-      x: spot.x,
-      z: spot.z,
+  sendCruiser(w) {
+    const place = this.findSpawn(w);
+    const cruiser = createCar(w, {
+      x: place.x,
+      z: place.z,
       heading: 0,
       color: 0xf5f5f5,
       name: 'Harbor PD',
       isPolice: true,
     });
-    ride.maxSpeed = 36;
-    game.policeCars.push(ride);
-    return ride;
+    cruiser.maxSpeed = 36;
+    w.policeCars.push(cruiser);
+    return cruiser;
   }
 
-  spawnPoliceCar(game) {
-    return this.sendCruiser(game);
+  spawnPoliceCar(w) {
+    return this.sendCruiser(w);
   }
 
-  sendOfficer(game) {
-    const cole = game.player.pos;
-    const angle = rand(0, Math.PI * 2);
-    const x = clamp(cole.x + Math.cos(angle) * OFFICER_SPAWN_RANGE, -230, 230);
-    const z = clamp(cole.z + Math.sin(angle) * OFFICER_SPAWN_RANGE, -230, 190);
-    const group = new THREE.Group();
-    const navy = new THREE.MeshStandardMaterial({ color: 0x1a2a4a, roughness: 0.8 });
-    const dark = new THREE.MeshStandardMaterial({ color: 0x14181f, roughness: 0.9 });
-    const skin = new THREE.MeshStandardMaterial({ color: 0xc98d64, roughness: 0.7 });
-    const capMat = new THREE.MeshStandardMaterial({ color: 0x101828, roughness: 0.6 });
-    const torso = cuboid(0.6, 0.85, 0.36, navy, 0, 1.05, 0);
-    torso.castShadow = true;
-    group.add(torso);
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.25, 10, 8), skin);
-    head.position.y = 1.7;
-    group.add(head);
-    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.27, 0.28, 0.14, 10), capMat);
-    cap.position.y = 1.88;
-    group.add(cap);
-    const legs = [
-      cuboid(0.22, 0.6, 0.24, dark, -0.15, 0.3, 0),
-      cuboid(0.22, 0.6, 0.24, dark, 0.15, 0.3, 0),
+  sendOfficer(w) {
+    const hero = w.player.pos;
+    const bearing = rand(0, Math.PI * 2);
+    const x = clamp(hero.x + Math.cos(bearing) * OFFICER_RANGE, -230, 230);
+    const z = clamp(hero.z + Math.sin(bearing) * OFFICER_RANGE, -230, 190);
+    const node = new THREE.Group();
+    const uniform = new THREE.MeshStandardMaterial({ color: 0x1a2a4a, roughness: 0.8 });
+    const trousers = new THREE.MeshStandardMaterial({ color: 0x14181f, roughness: 0.9 });
+    const flesh = new THREE.MeshStandardMaterial({ color: 0xc98d64, roughness: 0.7 });
+    const hatMat = new THREE.MeshStandardMaterial({ color: 0x101828, roughness: 0.6 });
+    const chest = boxPiece(0.6, 0.85, 0.36, uniform, 0, 1.05, 0);
+    chest.castShadow = true;
+    node.add(chest);
+    const skull = new THREE.Mesh(new THREE.SphereGeometry(0.25, 10, 8), flesh);
+    skull.position.y = 1.7;
+    node.add(skull);
+    const hat = new THREE.Mesh(new THREE.CylinderGeometry(0.27, 0.28, 0.14, 10), hatMat);
+    hat.position.y = 1.88;
+    node.add(hat);
+    const limbs = [
+      boxPiece(0.22, 0.6, 0.24, trousers, -0.15, 0.3, 0),
+      boxPiece(0.22, 0.6, 0.24, trousers, 0.15, 0.3, 0),
     ];
-    group.add(legs[0], legs[1]);
-    group.position.set(x, 0, z);
-    game.scene.add(group);
-    const officer = {
-      mesh: group,
-      legL: legs[0],
-      legR: legs[1],
-      pos: group.position,
+    node.add(limbs[0], limbs[1]);
+    node.position.set(x, 0, z);
+    w.scene.add(node);
+    const cop = {
+      mesh: node,
+      legL: limbs[0],
+      legR: limbs[1],
+      pos: node.position,
       heading: 0,
       phase: 0,
-      speed: OFFICER_FOOT_SPEED,
+      speed: OFFICER_WALK,
     };
-    game.officers.push(officer);
-    return officer;
+    w.officers.push(cop);
+    return cop;
   }
 
-  spawnOfficer(game) {
-    return this.sendOfficer(game);
+  spawnOfficer(w) {
+    return this.sendOfficer(w);
   }
 
-  runSiren(game) {
-    const cole = game.player.pos;
+  runSiren(w) {
+    const hero = w.player.pos;
     let close = false;
-    for (const ride of game.policeCars) {
-      if (dist2D(ride.pos.x, ride.pos.z, cole.x, cole.z) < SIREN_HEARING) close = true;
+    for (let i = 0; i < w.policeCars.length; i++) {
+      const cruiser = w.policeCars[i];
+      if (dist2D(cruiser.pos.x, cruiser.pos.z, hero.x, hero.z) < SIREN_RANGE) close = true;
     }
-    game.audio.setSiren(close && game.wanted > 0);
+    w.audio.setSiren(close && w.wanted > 0);
   }
 
-  runChase(game, dt) {
-    const cole = game.player;
-    for (const ride of game.policeCars) {
-      const dx = cole.pos.x - ride.pos.x;
-      const dz = cole.pos.z - ride.pos.z;
+  runChase(w, dt) {
+    const hero = w.player;
+    for (let i = 0; i < w.policeCars.length; i++) {
+      const cruiser = w.policeCars[i];
+      const dx = hero.pos.x - cruiser.pos.x;
+      const dz = hero.pos.z - cruiser.pos.z;
       const d = Math.hypot(dx, dz) || 1;
-      const wantHeading = Math.atan2(dx / d, dz / d);
-      ride.heading = angleLerp(ride.heading, wantHeading, Math.min(1, dt * 1.6));
-      const cruise = d > 60 ? ride.maxSpeed : CHASE_CRUISE;
-      ride.speed += clamp(cruise - ride.speed, -14 * dt, 12 * dt);
-      const nextX = ride.pos.x + Math.sin(ride.heading) * ride.speed * dt;
-      const nextZ = ride.pos.z + Math.cos(ride.heading) * ride.speed * dt;
-      const moved = collideCircle(game, nextX, nextZ, 2.1);
-      if (!moved.hit && inWorldBounds(moved.x, moved.z)) {
-        ride.pos.x = moved.x;
-        ride.pos.z = moved.z;
+      const targetHeading = Math.atan2(dx / d, dz / d);
+      cruiser.heading = angleLerp(cruiser.heading, targetHeading, Math.min(1, dt * 1.6));
+      const pace = d > 60 ? cruiser.maxSpeed : CHASE_SPEED;
+      cruiser.speed += clamp(pace - cruiser.speed, -14 * dt, 12 * dt);
+      const nx = cruiser.pos.x + Math.sin(cruiser.heading) * cruiser.speed * dt;
+      const nz = cruiser.pos.z + Math.cos(cruiser.heading) * cruiser.speed * dt;
+      const shift = collideCircle(w, nx, nz, 2.1);
+      if (!shift.hit && inWorldBounds(shift.x, shift.z)) {
+        cruiser.pos.x = shift.x;
+        cruiser.pos.z = shift.z;
       } else {
-        ride.speed *= 0.5;
+        cruiser.speed *= 0.5;
       }
-      this.ram(game, ride, d, dt);
-      for (const other of game.traffic) {
-        if (dist2D(ride.pos.x, ride.pos.z, other.pos.x, other.pos.z) < 5) other.stuck = 0.8;
+      this.ram(w, cruiser, d, dt);
+      for (let k = 0; k < w.traffic.length; k++) {
+        const car = w.traffic[k];
+        if (dist2D(cruiser.pos.x, cruiser.pos.z, car.pos.x, car.pos.z) < 5) car.stuck = 0.8;
       }
-      ride.mesh.position.copy(ride.pos);
-      ride.mesh.rotation.y = ride.heading;
-      for (const wheel of ride.wheels) wheel.rotation.x += ride.speed * dt * 2.4;
-      this.blinkBar(game, ride);
+      cruiser.mesh.position.copy(cruiser.pos);
+      cruiser.mesh.rotation.y = cruiser.heading;
+      for (let k = 0; k < cruiser.wheels.length; k++) cruiser.wheels[k].rotation.x += cruiser.speed * dt * 2.4;
+      this.blinkBar(w, cruiser);
     }
   }
 
   // A ram lands at most once a second per car, so a cruiser parked on Cole
   // cannot machine-gun him to death before an officer can arrive and make
   // the arrest.
-  ram(game, ride, dist, dt) {
-    ride.ramCooldown = Math.max(0, (ride.ramCooldown || 0) - dt);
-    if (dist >= RAM_REACH || ride.ramCooldown > 0) return;
-    ride.ramCooldown = RAM_COOLDOWN;
-    const cole = game.player;
-    if (cole.car) {
-      cole.car.speed *= 0.7;
-      ride.speed *= 0.5;
-      damageCar(game, cole.car, 8);
-      game.audio.crash();
-      game.fx.burst(ride.pos.clone().setY(1), 0xffaa33, 5, 3, 2);
-      damagePlayer(game, 3, 'ram');
+  ram(w, cruiser, dist, dt) {
+    cruiser.ramCooldown = Math.max(0, (cruiser.ramCooldown || 0) - dt);
+    if (dist >= RAM_RANGE || cruiser.ramCooldown > 0) return;
+    cruiser.ramCooldown = RAM_WAIT;
+    const hero = w.player;
+    if (hero.car) {
+      hero.car.speed *= 0.7;
+      cruiser.speed *= 0.5;
+      damageCar(w, hero.car, 8);
+      w.audio.crash();
+      w.fx.burst(cruiser.pos.clone().setY(1), 0xffaa33, 5, 3, 2);
+      damagePlayer(w, 3, 'ram');
     } else {
-      damagePlayer(game, 8, 'ram');
-      ride.speed *= 0.3;
+      damagePlayer(w, 8, 'ram');
+      cruiser.speed *= 0.3;
     }
-    game.fx.shake(0.3);
+    w.fx.shake(0.3);
   }
 
-  blinkBar(game, ride) {
-    const lamps = ride.mesh.userData.policeLights;
-    if (!lamps) return;
-    const redOn = Math.floor(game.time * 6) % 2 === 0;
-    lamps[0].material.color.setHex(redOn ? 0xff2222 : 0x551111);
-    lamps[1].material.color.setHex(redOn ? 0x112255 : 0x2266ff);
+  blinkBar(w, cruiser) {
+    const lights = cruiser.mesh.userData.policeLights;
+    if (!lights) return;
+    const redLit = Math.floor(w.time * 6) % 2 === 0;
+    lights[0].material.color.setHex(redLit ? 0xff2222 : 0x551111);
+    lights[1].material.color.setHex(redLit ? 0x112255 : 0x2266ff);
   }
 
   // Foot officers run Cole down; one holding on for two seconds on foot
   // makes the arrest. Officers cannot grab a driver — they chase the car
   // instead, waiting for him to step out.
-  runOfficers(game, dt) {
-    const cole = game.player;
-    let grabbing = false;
-    for (const officer of game.officers) {
-      const dx = cole.pos.x - officer.pos.x;
-      const dz = cole.pos.z - officer.pos.z;
+  runOfficers(w, dt) {
+    const hero = w.player;
+    let held = false;
+    for (let i = 0; i < w.officers.length; i++) {
+      const cop = w.officers[i];
+      const dx = hero.pos.x - cop.pos.x;
+      const dz = hero.pos.z - cop.pos.z;
       const d = Math.hypot(dx, dz) || 1;
-      officer.heading = Math.atan2(dx / d, dz / d);
-      const pace = cole.car ? OFFICER_CHASE_SPEED : OFFICER_FOOT_SPEED;
-      officer.pos.x += (dx / d) * pace * dt;
-      officer.pos.z += (dz / d) * pace * dt;
-      officer.phase += dt * pace * 2;
-      const swing = Math.sin(officer.phase) * 0.6;
-      officer.legL.rotation.x = swing;
-      officer.legR.rotation.x = -swing;
-      officer.mesh.position.copy(officer.pos);
-      officer.mesh.rotation.y = officer.heading;
-      if (!cole.car && d < GRAB_REACH) grabbing = true;
+      cop.heading = Math.atan2(dx / d, dz / d);
+      const speed = hero.car ? OFFICER_RUN : OFFICER_WALK;
+      cop.pos.x += (dx / d) * speed * dt;
+      cop.pos.z += (dz / d) * speed * dt;
+      cop.phase += dt * speed * 2;
+      const sway = Math.sin(cop.phase) * 0.6;
+      cop.legL.rotation.x = sway;
+      cop.legR.rotation.x = -sway;
+      cop.mesh.position.copy(cop.pos);
+      cop.mesh.rotation.y = cop.heading;
+      if (!hero.car && d < GRAB_RANGE) held = true;
     }
-    if (grabbing) {
-      this.grabTime += dt;
-      game.hud.showHint('The officer is grabbing you — move!');
-      if (this.grabTime > GRAB_HOLD_SECONDS) {
-        this.grabTime = 0;
-        game.missions.onBusted(game);
-      }
-    } else {
-      this.grabTime = Math.max(0, this.grabTime - dt * 2);
+    if (!held) {
+      this.holdClock = Math.max(0, this.holdClock - dt * 2);
+      return;
     }
+    this.holdClock += dt;
+    w.hud.showHint('The officer is grabbing you — move!');
+    if (this.holdClock <= GRAB_SECONDS) return;
+    this.holdClock = 0;
+    w.missions.onBusted(w);
   }
 }

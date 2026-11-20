@@ -1,22 +1,24 @@
-// Neon Harbor — the story arc. Cole Vance runs five jobs for his fixer
-// Mara Quinn while rival boss Dario Venn tries to shut him down. Each job
-// is a short chain of beats — steal, drive, pick up, survive, deliver —
-// and every beat knows how to tell when it is done. The chain drives the
-// beacon, the briefing card, the countdown and the payout. Payouts are
-// fixed per job, and the completion card reads its two numbers from the
-// same ledger at the same moment, so the reward and the running total can
-// never disagree with each other.
+// Neon Harbor — the story arc.
+//
+// Cole Vance runs five jobs for his fixer Mara Quinn while rival boss
+// Dario Venn tries to shut him down. Each job is a short chain of beats
+// — steal, drive, pick up, survive, deliver — and every beat knows how
+// to tell when it is done. The chain drives the beacon, the briefing
+// card, the countdown and the payout. Payouts are fixed per job, and the
+// completion card reads its two numbers from the same ledger at the same
+// moment, so the reward and the running total can never disagree with
+// each other.
 //
 // Free roam also has a taxi side job (the Taxi section at the bottom):
-// pick up a marked walker, drive them where they want to go, collect the
-// fare. It repeats and never blocks the story.
+// pick up a marked walker, drive them where they want to go, collect
+// the fare. It repeats and never blocks the story.
 import { dist2D, randInt, pick } from './state.js';
 import {
   markTaxiClient,
   unmarkTaxiClient,
 } from './pedestrians.js';
 
-const el = (id) => document.getElementById(id);
+const byId = (id) => document.getElementById(id);
 
 // One entry per job, in story order. `reward` is what the job pays on top
 // of whatever Cole already holds; `steps` run in order and the chain ends
@@ -80,65 +82,63 @@ export const MISSIONS = [
 ];
 
 // How close Cole (or his car) has to be to a marker for a beat to count.
-function nearMarker(game, key, radius) {
-  const spot = game.markers[key];
+function isNearSpot(w, key, radius) {
+  const spot = w.markers[key];
   if (!spot) return false;
-  return dist2D(game.player.pos.x, game.player.pos.z, spot.x, spot.z) < radius;
+  return dist2D(w.player.pos.x, w.player.pos.z, spot.x, spot.z) < radius;
 }
 
 // What getting caught or killed costs: a tenth of the wallet, at least
 // $25, never more than what Cole is carrying.
-function takeCut(game) {
-  const loss = Math.min(game.cash, Math.max(25, Math.round(game.cash * 0.1)));
-  game.cash -= loss;
+function bailCut(w) {
+  const loss = Math.min(w.cash, Math.max(25, Math.round(w.cash * 0.1)));
+  w.cash -= loss;
   return loss;
 }
 
-// One checker per beat type. A checker answers 'done' when its beat is
-// complete, 'fail' when it has blown its condition (only the timed beat
-// can fail), and anything else while it is still in progress. The
-// per-frame driver in Missions.update runs exactly one checker per frame.
-const BEAT_CHECKS = {
-  steal(game) {
-    return game.player.car ? 'done' : null;
-  },
-  stealSpecific(game, step) {
-    const ride = game.player.car;
-    return ride && ride.special === step.car ? 'done' : null;
-  },
-  enterSpecific(game, step) {
-    const ride = game.player.car;
-    return ride && ride.special === step.car ? 'done' : null;
-  },
-  goto(game, step) {
-    return nearMarker(game, step.target, step.radius) ? 'done' : null;
-  },
-  drive(game, step) {
-    return game.player.car && nearMarker(game, step.target, step.radius) ? 'done' : null;
-  },
-  pickup(game, step) {
-    if (game.player.car || !nearMarker(game, step.target, step.radius)) return null;
-    game.hud.showMessage('Package secured. The cops noticed — go!');
-    game.police.addWanted(game, 1, 'You grabbed the package!');
-    return 'done';
-  },
-  timed(game, step, dt) {
-    game.missionTimer -= dt;
-    const left = Math.max(0, Math.ceil(game.missionTimer));
-    game.hud.setObjective(`${step.text} — ${left}s`);
-    if (game.missionTimer <= 0) return 'fail';
-    return game.player.car && nearMarker(game, step.target, step.radius) ? 'done' : null;
-  },
-  ambush(game) {
-    // The ambush beat is armed by setupBeat; it ends when the last gunman
-    // is down. The live enemy list is the source of truth.
-    return game.enemies.length === 0 ? 'done' : null;
-  },
-};
+// Test the current beat. Returns 'done' when its beat is complete,
+// 'fail' when it has blown its condition (only the timed beat can fail),
+// and null while it is still in progress. The per-frame driver in
+// Missions.update runs exactly one test per frame.
+function testBeat(w, phase, dt) {
+  switch (phase.type) {
+    case 'steal':
+      return w.player.car ? 'done' : null;
+    case 'stealSpecific':
+    case 'enterSpecific': {
+      const car = w.player.car;
+      return car && car.special === phase.car ? 'done' : null;
+    }
+    case 'goto':
+      return isNearSpot(w, phase.target, phase.radius) ? 'done' : null;
+    case 'drive':
+      return w.player.car && isNearSpot(w, phase.target, phase.radius) ? 'done' : null;
+    case 'pickup': {
+      if (w.player.car) return null;
+      if (!isNearSpot(w, phase.target, phase.radius)) return null;
+      w.hud.showMessage('Package secured. The cops noticed — go!');
+      w.police.addWanted(w, 1, 'You grabbed the package!');
+      return 'done';
+    }
+    case 'timed': {
+      w.missionTimer -= dt;
+      const left = Math.max(0, Math.ceil(w.missionTimer));
+      w.hud.setObjective(`${phase.text} — ${left}s`);
+      if (w.missionTimer <= 0) return 'fail';
+      return w.player.car && isNearSpot(w, phase.target, phase.radius) ? 'done' : null;
+    }
+    case 'ambush':
+      // The ambush beat is armed by setupBeat; it ends when the last
+      // gunman is down. The live enemy list is the source of truth.
+      return w.enemies.length === 0 ? 'done' : null;
+    default:
+      return null;
+  }
+}
 
 // Taxi destinations: named markers a fare might ask for, with the label
 // the HUD shows.
-const FARE_STOPS = [
+const TAXI_STOPS = [
   { key: 'garage', label: "Mara's garage" },
   { key: 'paintShop', label: 'the paint shop' },
   { key: 'docks', label: 'the docks' },
@@ -150,7 +150,7 @@ const FARE_STOPS = [
   { key: 'spray', label: 'the Pay N Spray' },
 ];
 
-const FREE_ROAM_LINE = 'Neon Harbor is yours — explore, steal cars, stay out of trouble.';
+const ROAM_LINE = 'Neon Harbor is yours — explore, steal cars, stay out of trouble.';
 
 export class Missions {
   constructor(game) {
@@ -160,208 +160,211 @@ export class Missions {
 
   current() {
     const idx = this.game.missionIndex;
-    return idx >= 0 && idx < MISSIONS.length ? MISSIONS[idx] : null;
+    if (idx < 0 || idx >= MISSIONS.length) return null;
+    return MISSIONS[idx];
   }
 
   currentBeat() {
-    const job = this.current();
-    if (!job) return null;
-    const step = job.steps[this.game.missionStep];
-    return step || null;
+    const task = this.current();
+    if (!task) return null;
+    return task.steps[this.game.missionStep] || null;
   }
 
-  update(game, dt) {
-    if (!game.missionActive || game.mode !== 'playing') return;
-    const beat = this.currentBeat();
-    if (!beat) return;
-    const check = BEAT_CHECKS[beat.type];
-    if (!check) return;
-    const result = check(game, beat, dt);
-    if (result === 'done') this.advance(game);
-    else if (result === 'fail') this.failMission(game, 'Too slow — the package window closed');
+  update(w, dt) {
+    if (!w.missionActive || w.mode !== 'playing') return;
+    const phase = this.currentBeat();
+    if (!phase) return;
+    const result = testBeat(w, phase, dt);
+    if (result === 'done') this.advance(w);
+    if (result === 'fail') this.failMission(w, 'Too slow — the package window closed');
   }
 
   // (Re)start a job, optionally mid-chain. `showBriefing` pops Mara's card
   // and pauses the world until the player hits GO; staged screenshots and
   // restarts skip it.
-  startMission(game, index, showBriefing = true, startStep = 0) {
-    const job = MISSIONS[index];
-    if (!job) {
-      this.setFreeRoam(game);
+  startMission(w, index, showBriefing = true, startStep = 0) {
+    const task = MISSIONS[index];
+    if (!task) {
+      this.setFreeRoam(w);
       return;
     }
-    game.missionIndex = index;
-    game.missionStep = Math.max(0, Math.min(startStep | 0, job.steps.length - 1));
-    game.missionActive = true;
-    game.missionDone = false;
-    game.missionTimer = 0;
+    w.missionIndex = index;
+    let step = startStep | 0;
+    if (step < 0) step = 0;
+    if (step > task.steps.length - 1) step = task.steps.length - 1;
+    w.missionStep = step;
+    w.missionActive = true;
+    w.missionDone = false;
+    w.missionTimer = 0;
     this.ambushArmed = false;
-    game.hud.setMissionName(`Mission ${index + 1}: ${job.name}`);
+    w.hud.setMissionName(`Mission ${index + 1}: ${task.name}`);
     if (showBriefing) {
-      game.mode = 'briefing';
-      el('briefing-title').textContent = `MISSION ${index + 1} — ${job.name}`;
-      el('briefing-text').textContent = job.briefing;
-      el('briefing').classList.remove('hidden');
+      w.mode = 'briefing';
+      byId('briefing-title').textContent = `MISSION ${index + 1} — ${task.name}`;
+      byId('briefing-text').textContent = task.briefing;
+      byId('briefing').classList.remove('hidden');
     }
-    this.setupBeat(game);
+    this.setupBeat(w);
   }
 
   // Point the HUD and the beacon at the current beat, and run the beat's
   // one-time setup: spawn the ambush crew, floor the wanted level, arm the
   // countdown. Called on start and on every advance.
-  setupBeat(game) {
-    const beat = this.currentBeat();
-    if (!beat) return;
-    game.hud.setObjective(beat.text);
-    const spot = beat.target ? game.markers[beat.target] : null;
+  setupBeat(w) {
+    const phase = this.currentBeat();
+    if (!phase) return;
+    w.hud.setObjective(phase.text);
+    const spot = phase.target ? w.markers[phase.target] : null;
     if (spot) {
-      game.beacon.position.copy(spot);
-      game.beacon.visible = true;
-      game.beaconTarget = spot;
+      w.beacon.position.copy(spot);
+      w.beacon.visible = true;
+      w.beaconTarget = spot;
     } else {
-      game.beacon.visible = false;
-      game.beaconTarget = null;
+      w.beacon.visible = false;
+      w.beaconTarget = null;
     }
-    if (beat.type === 'ambush' && !this.ambushArmed) {
+    if (phase.type === 'ambush' && !this.ambushArmed) {
       this.ambushArmed = true;
-      const warehouse = game.markers.warehouse;
-      const offsets = [
+      const warehouse = w.markers.warehouse;
+      const crew = [
         [8, 4],
         [-8, 6],
         [4, -8],
         [-6, -6],
       ];
-      for (const [dx, dz] of offsets) game.combat.spawnEnemy(game, warehouse.x + dx, warehouse.z + dz);
-      game.hud.showMessage("Ambush! Venn's crew is here — take them down!");
-      game.audio.fail();
+      for (let k = 0; k < crew.length; k++) {
+        w.combat.spawnEnemy(w, warehouse.x + crew[k][0], warehouse.z + crew[k][1]);
+      }
+      w.hud.showMessage("Ambush! Venn's crew is here — take them down!");
+      w.audio.fail();
     }
-    if (beat.wanted && game.wanted < beat.wanted) {
-      game.police.addWanted(game, beat.wanted - game.wanted, 'The heat is on!');
+    if (phase.wanted > 0 && w.wanted < phase.wanted) {
+      w.police.addWanted(w, phase.wanted - w.wanted, 'The heat is on!');
     }
-    if (beat.type === 'timed') game.missionTimer = beat.seconds;
+    if (phase.type === 'timed') w.missionTimer = phase.seconds;
   }
 
-  applyStep(game) {
-    this.setupBeat(game);
+  applyStep(w) {
+    this.setupBeat(w);
   }
 
-  setFreeRoam(game) {
-    game.missionActive = false;
-    game.missionIndex = MISSIONS.length;
-    game.missionStep = 0;
-    game.beacon.visible = false;
-    game.beaconTarget = null;
-    game.hud.setMissionName('Free Roam');
-    game.hud.setObjective(FREE_ROAM_LINE);
+  setFreeRoam(w) {
+    w.missionActive = false;
+    w.missionIndex = MISSIONS.length;
+    w.missionStep = 0;
+    w.beacon.visible = false;
+    w.beaconTarget = null;
+    w.hud.setMissionName('Free Roam');
+    w.hud.setObjective(ROAM_LINE);
   }
 
   // Move to the next beat, or pay out when the chain is finished.
-  advance(game) {
-    const job = this.current();
-    if (!job) return;
-    game.missionStep++;
-    if (game.missionStep >= job.steps.length) {
-      this.completeMission(game);
-    } else {
-      this.setupBeat(game);
-      game.audio.chime();
+  advance(w) {
+    const task = this.current();
+    if (!task) return;
+    w.missionStep++;
+    if (w.missionStep >= task.steps.length) {
+      this.completeMission(w);
+      return;
     }
+    this.setupBeat(w);
+    w.audio.chime();
   }
 
   // The one place the payout numbers are written. Cash is credited first,
   // then the card reads the reward from the job and the total from the live
   // cash balance — both from the same moment, so the card can never show a
   // reward that does not add up to the total beside it.
-  completeMission(game) {
-    const job = this.current();
-    if (!job) return;
-    const finishedIndex = game.missionIndex;
-    game.cash += job.reward;
-    game.stats.missionsDone++;
-    game.missionActive = false;
-    game.beacon.visible = false;
-    game.beaconTarget = null;
-    game.audio.missionComplete();
-    game.missionIndex++;
-    game.missionStep = 0;
-    game.save.save(game);
-    if (game.missionIndex >= MISSIONS.length) {
-      game.missionDone = true;
-      game.mode = 'ending';
-      el('ending-stats').textContent =
-        `Total earned: $${game.cash}  •  Cars stolen: ${game.stats.carsStolen}  •  Crimes: ${game.stats.crimes}`;
-      el('ending-screen').classList.remove('hidden');
-      game.hud.setMissionName('Free Roam');
-      game.hud.setObjective(FREE_ROAM_LINE);
+  completeMission(w) {
+    const task = this.current();
+    if (!task) return;
+    const finishedIndex = w.missionIndex;
+    w.cash += task.reward;
+    w.stats.missionsDone++;
+    w.missionActive = false;
+    w.beacon.visible = false;
+    w.beaconTarget = null;
+    w.audio.missionComplete();
+    w.missionIndex++;
+    w.missionStep = 0;
+    w.save.save(w);
+    if (w.missionIndex < MISSIONS.length) {
+      this.showCompletionCard(w, task, finishedIndex);
+      w.mode = 'mission-complete';
       return;
     }
-    this.showCompletionCard(game, job, finishedIndex);
-    game.mode = 'mission-complete';
+    w.missionDone = true;
+    w.mode = 'ending';
+    byId('ending-stats').textContent =
+      `Total earned: $${w.cash}  •  Cars stolen: ${w.stats.carsStolen}  •  Crimes: ${w.stats.crimes}`;
+    byId('ending-screen').classList.remove('hidden');
+    w.hud.setMissionName('Free Roam');
+    w.hud.setObjective(ROAM_LINE);
   }
 
   // Fill the mission-complete card from the job and the live cash balance.
   // Exposed so screenshot staging can render the exact same card the real
   // payout path renders, instead of hand-writing its numbers.
-  showCompletionCard(game, job, index = game.missionIndex) {
-    el('mission-panel-title').textContent = 'MISSION COMPLETE';
-    el('mission-panel-text').textContent = `${job.name} — nicely driven, Cole.`;
-    el('mission-panel-reward').textContent =
-      `Reward: $${job.reward}  •  Total cash: $${game.cash}`;
-    el('mission-panel').classList.remove('hidden');
-    game.hud.setMissionName(`Mission ${index + 1}: ${job.name}`);
+  showCompletionCard(w, task, index = w.missionIndex) {
+    byId('mission-panel-title').textContent = 'MISSION COMPLETE';
+    byId('mission-panel-text').textContent = `${task.name} — nicely driven, Cole.`;
+    byId('mission-panel-reward').textContent =
+      `Reward: $${task.reward}  •  Total cash: $${w.cash}`;
+    byId('mission-panel').classList.remove('hidden');
+    w.hud.setMissionName(`Mission ${index + 1}: ${task.name}`);
   }
 
   // A blown beat restarts its job from the first beat, with the reason on
   // screen so the player knows why they are back at the start.
-  failMission(game, reason) {
-    game.hud.showMessage(`${reason} — mission restarted.`);
-    game.audio.fail();
-    this.startMission(game, game.missionIndex, false);
-    game.mode = 'playing';
+  failMission(w, reason) {
+    w.hud.showMessage(`${reason} — mission restarted.`);
+    w.audio.fail();
+    this.startMission(w, w.missionIndex, false);
+    w.mode = 'playing';
   }
 
-  onEnemyKilled(game) {
+  onEnemyKilled(w) {
     // Ambush progress is read live from game.enemies in update(); nothing
     // to bookkeep here.
   }
 
   // Busted and wasted share the same shape: lose a slice of the wallet,
   // stop the siren, show the screen. The respawn button does the rest.
-  onBusted(game) {
-    const loss = takeCut(game);
-    game.mode = 'busted';
-    game.audio.fail();
-    game.audio.setSiren(false);
-    el('busted-screen').classList.remove('hidden');
-    game.hud.showMessage(`Busted! Bail cost you $${loss}.`);
+  onBusted(w) {
+    const loss = bailCut(w);
+    w.mode = 'busted';
+    w.audio.fail();
+    w.audio.setSiren(false);
+    byId('busted-screen').classList.remove('hidden');
+    w.hud.showMessage(`Busted! Bail cost you $${loss}.`);
   }
 
-  onWasted(game) {
-    const loss = takeCut(game);
-    game.mode = 'wasted';
-    game.audio.fail();
-    game.audio.setSiren(false);
-    el('wasted-screen').classList.remove('hidden');
-    game.hud.showMessage(`Wasted! The hospital bill was $${loss}.`);
+  onWasted(w) {
+    const loss = bailCut(w);
+    w.mode = 'wasted';
+    w.audio.fail();
+    w.audio.setSiren(false);
+    byId('wasted-screen').classList.remove('hidden');
+    w.hud.showMessage(`Wasted! The hospital bill was $${loss}.`);
   }
 
-  respawn(game) {
-    const cole = game.player;
-    if (cole.car) {
-      cole.car.speed = 0;
-      cole.car = null;
+  respawn(w) {
+    const hero = w.player;
+    if (hero.car) {
+      hero.car.speed = 0;
+      hero.car = null;
     }
-    cole.pos.set(game.markers.hideout.x, 0, game.markers.hideout.z);
-    cole.heading = 0;
-    cole.health = cole.maxHealth;
-    cole.ammo = Math.max(6, cole.ammo);
-    game.police.clearWanted(game);
-    this.cancelFare(game);
-    game.save.save(game);
-    el('busted-screen').classList.add('hidden');
-    el('wasted-screen').classList.add('hidden');
-    game.mode = 'playing';
-    game.hud.showMessage('Back on the street. Stay sharp, Cole.');
+    hero.pos.set(w.markers.hideout.x, 0, w.markers.hideout.z);
+    hero.heading = 0;
+    hero.health = hero.maxHealth;
+    hero.ammo = Math.max(6, hero.ammo);
+    w.police.clearWanted(w);
+    this.cancelFare(w);
+    w.save.save(w);
+    byId('busted-screen').classList.add('hidden');
+    byId('wasted-screen').classList.add('hidden');
+    w.mode = 'playing';
+    w.hud.showMessage('Back on the street. Stay sharp, Cole.');
   }
 
   // ----- Taxi side job (free roam only) -----
@@ -369,36 +372,36 @@ export class Missions {
   // Called every frame while playing in free roam. When no fare is waiting
   // and none is riding, a short wait timer runs and then a nearby walker
   // is marked as the next fare.
-  updateTaxi(game, dt) {
-    const taxi = game.taxi;
-    if (game.missionActive || game.mode !== 'playing') return;
-    if (taxi.phase === 'none') {
-      taxi.waitTimer -= dt;
-      if (taxi.waitTimer > 0) return;
-      this.offerFare(game);
+  updateTaxi(w, dt) {
+    const taxi = w.taxi;
+    if (w.missionActive || w.mode !== 'playing') return;
+    if (taxi.phase === 'ride') {
+      // Arrival: the car has to be at the destination, not just Cole.
+      if (taxi.dest && w.player.car && isNearSpot(w, taxi.dest.key, 9)) {
+        this.dropFare(w);
+      }
       return;
     }
-    if (taxi.phase === 'ride' && taxi.dest) {
-      // Arrival: the car has to be at the destination, not just Cole.
-      if (game.player.car && nearMarker(game, taxi.dest.key, 9)) {
-        this.dropFare(game);
-      }
-    }
+    if (taxi.phase !== 'none') return;
+    taxi.waitTimer -= dt;
+    if (taxi.waitTimer > 0) return;
+    this.offerFare(w);
   }
 
-  offerFare(game) {
-    const taxi = game.taxi;
+  offerFare(w) {
+    const taxi = w.taxi;
     const nearby = [];
-    for (const ped of game.peds) {
+    for (let i = 0; i < w.peds.length; i++) {
+      const ped = w.peds[i];
       if (ped.state !== 'walk') continue;
-      if (dist2D(ped.pos.x, ped.pos.z, game.player.pos.x, game.player.pos.z) >= 70) continue;
+      if (dist2D(ped.pos.x, ped.pos.z, w.player.pos.x, w.player.pos.z) >= 70) continue;
       nearby.push(ped);
     }
     if (nearby.length === 0) {
       taxi.waitTimer = 5;
       return;
     }
-    const client = markTaxiClient(game, pick(nearby));
+    const client = markTaxiClient(w, pick(nearby));
     if (!client) {
       taxi.waitTimer = 5;
       return;
@@ -407,58 +410,58 @@ export class Missions {
     taxi.phase = 'wait';
     taxi.fare = 0;
     taxi.dest = null;
-    game.hud.showMessage('A fare is waiting — look for the yellow marker. Walk up and press T.');
+    w.hud.showMessage('A fare is waiting — look for the yellow marker. Walk up and press T.');
   }
 
   // The player pressed T next to the waiting fare. The walker climbs in
   // (their mesh leaves the street), a destination is picked, and the
   // beacon points the way.
-  pickupFare(game) {
-    const taxi = game.taxi;
+  pickupFare(w) {
+    const taxi = w.taxi;
     if (taxi.phase !== 'wait' || !taxi.client) return false;
     const client = taxi.client;
-    if (dist2D(client.pos.x, client.pos.z, game.player.pos.x, game.player.pos.z) > 4) return false;
-    const stop = pick(FARE_STOPS);
+    if (dist2D(client.pos.x, client.pos.z, w.player.pos.x, w.player.pos.z) > 4) return false;
+    const stop = pick(TAXI_STOPS);
     taxi.dest = stop;
     taxi.fare = Math.round(randInt(40, 80) / 5) * 5;
     taxi.phase = 'ride';
-    game.scene.remove(client.mesh);
-    game.peds = game.peds.filter((ped) => ped !== client);
-    const destPos = game.markers[stop.key];
-    game.beacon.position.copy(destPos);
-    game.beacon.visible = true;
-    game.beaconTarget = destPos;
-    game.hud.setObjective(`Taxi fare: drop your passenger at ${stop.label} — $${taxi.fare}`);
-    game.hud.showMessage(`Fare picked up. Take them to ${stop.label}.`);
+    w.scene.remove(client.mesh);
+    w.peds = w.peds.filter((ped) => ped !== client);
+    const destPos = w.markers[stop.key];
+    w.beacon.position.copy(destPos);
+    w.beacon.visible = true;
+    w.beaconTarget = destPos;
+    w.hud.setObjective(`Taxi fare: drop your passenger at ${stop.label} — $${taxi.fare}`);
+    w.hud.showMessage(`Fare picked up. Take them to ${stop.label}.`);
     return true;
   }
 
-  dropFare(game) {
-    const taxi = game.taxi;
-    game.cash += taxi.fare;
-    game.audio.cash();
-    game.hud.showMessage(`Fare paid: $${taxi.fare}.`);
-    game.beacon.visible = false;
-    game.beaconTarget = null;
+  dropFare(w) {
+    const taxi = w.taxi;
+    w.cash += taxi.fare;
+    w.audio.cash();
+    w.hud.showMessage(`Fare paid: $${taxi.fare}.`);
+    w.beacon.visible = false;
+    w.beaconTarget = null;
     taxi.phase = 'none';
     taxi.client = null;
     taxi.dest = null;
     taxi.fare = 0;
     taxi.waitTimer = 8;
-    game.hud.setObjective(FREE_ROAM_LINE);
+    w.hud.setObjective(ROAM_LINE);
   }
 
   // A fare waiting too long, or a busted/wasted respawn, cancels the job
   // cleanly so the next offer can come up fresh.
-  cancelFare(game) {
-    const taxi = game.taxi;
-    if (taxi.client) unmarkTaxiClient(game, taxi.client);
+  cancelFare(w) {
+    const taxi = w.taxi;
+    if (taxi.client) unmarkTaxiClient(w, taxi.client);
     taxi.phase = 'none';
     taxi.client = null;
     taxi.dest = null;
     taxi.fare = 0;
     taxi.waitTimer = 10;
-    game.beacon.visible = false;
-    game.beaconTarget = null;
+    w.beacon.visible = false;
+    w.beaconTarget = null;
   }
 }
