@@ -1,45 +1,80 @@
-// Neon Harbor — the HUD: health bar, cash, wanted stars, objective line,
-// weapon and ammo, speed and car condition, the message feed, the damage
-// vignette, and a live minimap that follows Cole around the city.
+// Neon Harbor — the HUD. It paints the health bar, the cash readout, the
+// wanted stars, the current objective, the weapon and ammo, the speed and
+// car-condition readouts while driving, the scrolling message feed, the
+// red damage flash, and a live minimap that tracks Cole through the city.
 //
-// Minimap geometry, because the arrow has been wrong before: the map is
-// north-up, so world +x runs right and world -z (north) runs up, which
-// means world +z (south) runs down the canvas. A heading is atan2(fx, fz),
-// so heading 0 faces +z, straight down the map, and heading PI faces -z,
-// straight up it. The arrow sprite is drawn pointing up (tip at -y), so
-// the canvas rotation that puts its tip along the heading is PI - heading:
-// heading 0 rotates it half a turn to point down (south), heading PI leaves
-// it pointing up (north). Rotating by the bare heading instead would flip
-// north and south.
+// How the minimap arrow works, since it has pointed the wrong way before:
+// the map is north-up, so world +x goes right and world -z (north) goes up,
+// which puts world +z (south) at the bottom of the canvas. A heading is
+// atan2 of the forward x and z, so heading 0 faces +z — straight down the
+// map — and heading PI faces -z, straight up it. The arrow is drawn
+// pointing up, tip at -y, so the canvas turn that aims its tip along the
+// heading is PI minus the heading: at heading 0 it spins half a turn to
+// point down (south), at heading PI it stays pointing up (north). Turning
+// it by the bare heading would swap north and south.
 import { WORLD, clamp } from './state.js';
 
-const MAP_SIZE = 190;
-const MAP_SCALE = MAP_SIZE / 560;
+const MAP_EDGE = 190;
+const MAP_ZOOM = MAP_EDGE / 560;
+const FEED_MAX = 4;
+const FEED_LIFE_MS = 9000;
+const DAMAGE_FLASH_MS = 220;
+
+const PALETTE = {
+  mapBack: '#0d1526',
+  block: '#232a3a',
+  road: '#3a3f4d',
+  water: '#1d5f7a',
+  sand: '#d9b98a',
+  spray: '#4fa8ff',
+  beacon: '#ffd23e',
+  arrow: '#ffffff',
+  arrowEdge: '#111111',
+  trafficDot: '#e8e8e8',
+  copDot: '#ff4444',
+  officerDot: '#ff8888',
+  pedDot: '#7dff9e',
+  enemyDot: '#ff2222',
+  fareDot: '#ffd23e',
+  healthy: 'linear-gradient(90deg,#37d67a,#7dff9e)',
+  hurt: 'linear-gradient(90deg,#f39c12,#ffd76a)',
+  critical: 'linear-gradient(90deg,#e74c3c,#ff7a6a)',
+  carOk: '#7dff9e',
+  carWorn: '#ffd76a',
+  carBad: '#ff7a6a',
+  ring: 'rgba(255,255,255,.4)',
+};
+
+const HEALTH_BANDS = [
+  { above: 50, fill: PALETTE.healthy },
+  { above: 25, fill: PALETTE.hurt },
+  { above: -1, fill: PALETTE.critical },
+];
 
 export class HUD {
-  constructor(G) {
-    this.G = G;
-    const $ = (id) => document.getElementById(id);
+  constructor(game) {
+    this.game = game;
+    const wanted = (id) => document.getElementById(id);
     this.el = {
-      hud: $('hud'),
-      healthBar: $('health-bar'),
-      healthText: $('health-text'),
-      cash: $('cash-text'),
-      ammo: $('ammo'),
-      ammoText: $('ammo-text'),
-      stars: $('stars'),
-      missionName: $('mission-name'),
-      objective: $('objective'),
-      crosshair: $('crosshair'),
-      minimap: $('minimap'),
-      speed: $('speed'),
-      speedText: $('speed-text'),
-      carHealth: $('car-health'),
-      carHealthText: $('car-health-text'),
-      feed: $('feed'),
-      hint: $('hint'),
-      vignette: $('vignette'),
-      interact: $('interact'),
+      hud: wanted('hud'),
+      healthBar: wanted('health-bar'),
+      healthText: wanted('health-text'),
+      cash: wanted('cash-text'),
+      ammo: wanted('ammo'),
+      ammoText: wanted('ammo-text'),
+      stars: wanted('stars'),
+      missionName: wanted('mission-name'),
+      objective: wanted('objective'),
+      crosshair: wanted('crosshair'),
+      minimap: wanted('minimap'),
+      speed: wanted('speed'),
+      speedText: wanted('speed-text'),
+      carHealth: wanted('car-health'),
+      carHealthText: wanted('car-health-text'),
+      feed: wanted('feed'),
+      hint: wanted('hint'),
+      vignette: wanted('vignette'),
+      interact: wanted('interact'),
     };
     this.mapCtx = this.el.minimap.getContext('2d');
     this.hintTimer = 0;
@@ -69,13 +104,12 @@ export class HUD {
 
   // Newest message on top, four at most, each gone after nine seconds.
   showMessage(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    this.el.feed.prepend(div);
-    while (this.el.feed.children.length > 4) this.el.feed.removeChild(this.el.feed.lastChild);
-    setTimeout(() => {
-      if (div.parentNode) div.parentNode.removeChild(div);
-    }, 9000);
+    const node = document.createElement('div');
+    node.textContent = text;
+    const feed = this.el.feed;
+    feed.prepend(node);
+    while (feed.childElementCount > FEED_MAX) feed.removeChild(feed.lastChild);
+    setTimeout(() => node.parentNode && node.parentNode.removeChild(node), FEED_LIFE_MS);
   }
 
   showHint(text, seconds = 3) {
@@ -85,153 +119,145 @@ export class HUD {
   }
 
   flashDamage() {
-    this.el.vignette.style.opacity = '1';
+    const veil = this.el.vignette;
+    veil.style.opacity = '1';
     setTimeout(() => {
-      this.el.vignette.style.opacity = '0';
-    }, 220);
+      veil.style.opacity = '0';
+    }, DAMAGE_FLASH_MS);
   }
 
-  update(G, dt) {
-    const p = G.player;
-    if (!p) return;
-    this.renderHealth(p);
-    this.el.cash.textContent = G.cash;
-    this.renderStars(G.wanted);
-    this.renderWeapon(p);
-    this.renderDrive(p);
+  update(game, dt) {
+    const cole = game.player;
+    if (!cole) return;
+    this.renderHealth(cole);
+    this.el.cash.textContent = game.cash;
+    this.renderStars(game.wanted);
+    this.renderWeapon(cole);
+    this.renderDrive(cole);
     if (this.hintTimer > 0) {
       this.hintTimer -= dt;
       if (this.hintTimer <= 0) this.el.hint.classList.add('hidden');
     }
-    this.renderMap(G);
+    this.renderMap(game);
   }
 
-  renderHealth(p) {
-    const hp = clamp(p.health, 0, 100);
+  renderHealth(cole) {
+    const hp = clamp(cole.health, 0, 100);
+    const band = HEALTH_BANDS.find((b) => hp > b.above);
     const bar = this.el.healthBar;
     bar.style.width = `${hp}%`;
-    if (hp > 50) bar.style.background = 'linear-gradient(90deg,#37d67a,#7dff9e)';
-    else if (hp > 25) bar.style.background = 'linear-gradient(90deg,#f39c12,#ffd76a)';
-    else bar.style.background = 'linear-gradient(90deg,#e74c3c,#ff7a6a)';
-    this.el.healthText.textContent = Math.ceil(p.health);
+    bar.style.background = band.fill;
+    this.el.healthText.textContent = Math.ceil(cole.health);
   }
 
   renderStars(wanted) {
-    let html = '';
-    for (let i = 0; i < 5; i++) {
-      html += i < wanted ? '★' : '<span class="off">★</span>';
-    }
-    this.el.stars.innerHTML = html;
+    const lit = '★';
+    const dim = '<span class="off">★</span>';
+    this.el.stars.innerHTML = Array.from({ length: 5 }, (_, i) => (i < wanted ? lit : dim)).join('');
   }
 
-  renderWeapon(p) {
-    const aiming = p.weapon === 'pistol' && !p.car;
+  renderWeapon(cole) {
+    const aiming = cole.weapon === 'pistol' && !cole.car;
     this.el.ammo.classList.toggle('hidden', !aiming);
     this.el.crosshair.classList.toggle('hidden', !aiming);
-    if (aiming) this.el.ammoText.textContent = p.ammo;
+    if (aiming) this.el.ammoText.textContent = cole.ammo;
   }
 
   // Speed while driving, plus the car's condition: green while healthy,
   // amber when dented, red when it is about to quit. Hidden on foot.
-  renderDrive(p) {
-    const driving = !!p.car;
+  renderDrive(cole) {
+    const driving = !!cole.car;
     this.el.speed.classList.toggle('hidden', !driving);
     this.el.carHealth.classList.toggle('hidden', !driving);
     if (!driving) return;
-    this.el.speedText.textContent = Math.round(Math.abs(p.car.speed) * 2.2);
-    const hp = Math.max(0, Math.round(p.car.health));
+    this.el.speedText.textContent = Math.round(Math.abs(cole.car.speed) * 2.2);
+    const hp = Math.max(0, Math.round(cole.car.health));
     this.el.carHealthText.textContent = hp;
-    if (hp > 60) this.el.carHealth.style.color = '#7dff9e';
-    else if (hp > 30) this.el.carHealth.style.color = '#ffd76a';
-    else this.el.carHealth.style.color = '#ff7a6a';
+    const tone = hp > 60 ? PALETTE.carOk : hp > 30 ? PALETTE.carWorn : PALETTE.carBad;
+    this.el.carHealth.style.color = tone;
   }
 
-  renderMap(G) {
+  renderMap(game) {
     const ctx = this.mapCtx;
-    const S = MAP_SIZE;
-    const C = S / 2;
-    const px = G.player.pos.x;
-    const pz = G.player.pos.z;
-    const toMap = (x, z) => [C + (x - px) * MAP_SCALE, C + (z - pz) * MAP_SCALE];
-    const dot = (x, z, r, color) => {
-      const [mx, my] = toMap(x, z);
-      if (mx < -5 || mx > S + 5 || my < -5 || my > S + 5) return;
+    const edge = MAP_EDGE;
+    const mid = edge / 2;
+    const px = game.player.pos.x;
+    const pz = game.player.pos.z;
+    const project = (x, z) => ({ x: mid + (x - px) * MAP_ZOOM, y: mid + (z - pz) * MAP_ZOOM });
+    const plot = (x, z, r, color) => {
+      const at = project(x, z);
+      if (at.x < -5 || at.x > edge + 5 || at.y < -5 || at.y > edge + 5) return;
       ctx.fillStyle = color;
       ctx.beginPath();
-      ctx.arc(mx, my, r, 0, Math.PI * 2);
+      ctx.arc(at.x, at.y, r, 0, Math.PI * 2);
       ctx.fill();
     };
-    ctx.clearRect(0, 0, S, S);
+    ctx.clearRect(0, 0, edge, edge);
     ctx.save();
     ctx.beginPath();
-    ctx.arc(C, C, C - 2, 0, Math.PI * 2);
+    ctx.arc(mid, mid, mid - 2, 0, Math.PI * 2);
     ctx.clip();
-    ctx.fillStyle = '#0d1526';
-    ctx.fillRect(0, 0, S, S);
+    ctx.fillStyle = PALETTE.mapBack;
+    ctx.fillRect(0, 0, edge, edge);
     // City blocks first, then roads over them.
-    ctx.fillStyle = '#232a3a';
+    ctx.fillStyle = PALETTE.block;
     for (let bx = 0; bx < 7; bx++) {
       for (let bz = 0; bz < 7; bz++) {
-        const cx = -180 + bx * 60 + 30;
         const cz = -180 + bz * 60 + 30;
         if (cz > 150) continue;
-        const [x, y] = toMap(cx - 20, cz - 20);
-        ctx.fillRect(x, y, 40 * MAP_SCALE, 40 * MAP_SCALE);
+        const corner = project(-180 + bx * 60 + 10, cz - 20);
+        ctx.fillRect(corner.x, corner.y, 40 * MAP_ZOOM, 40 * MAP_ZOOM);
       }
     }
-    ctx.strokeStyle = '#3a3f4d';
-    ctx.lineWidth = Math.max(2, WORLD.roadWidth * MAP_SCALE);
-    for (const rx of G.roads.xs) {
-      const [x1, y1] = toMap(rx, -240);
-      const [x2, y2] = toMap(rx, 240);
+    ctx.strokeStyle = PALETTE.road;
+    ctx.lineWidth = Math.max(2, WORLD.roadWidth * MAP_ZOOM);
+    const roadRuns = [];
+    for (const rx of game.roads.xs) roadRuns.push([project(rx, -240), project(rx, 240)]);
+    for (const rz of game.roads.zs) roadRuns.push([project(-240, rz), project(240, rz)]);
+    for (const [from, to] of roadRuns) {
       ctx.beginPath();
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
-      ctx.stroke();
-    }
-    for (const rz of G.roads.zs) {
-      const [x1, y1] = toMap(-240, rz);
-      const [x2, y2] = toMap(240, rz);
-      ctx.beginPath();
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
       ctx.stroke();
     }
     // Water to the south, sand band above it.
-    const [, waterY] = toMap(0, WORLD.waterZ);
-    ctx.fillStyle = '#1d5f7a';
-    ctx.fillRect(0, waterY, S, S);
-    const [, sandY] = toMap(0, WORLD.sandZ);
-    ctx.fillStyle = '#d9b98a';
-    ctx.fillRect(0, sandY, S, waterY - sandY);
+    const waterAt = project(0, WORLD.waterZ);
+    ctx.fillStyle = PALETTE.water;
+    ctx.fillRect(0, waterAt.y, edge, edge);
+    const sandAt = project(0, WORLD.sandZ);
+    ctx.fillStyle = PALETTE.sand;
+    ctx.fillRect(0, sandAt.y, edge, waterAt.y - sandAt.y);
     // Pay N Spray: a blue square so the garage is findable on the map.
-    if (G.markers.spray) {
-      const [mx, my] = toMap(G.markers.spray.x, G.markers.spray.z);
-      ctx.fillStyle = '#4fa8ff';
-      ctx.fillRect(mx - 4, my - 4, 8, 8);
+    if (game.markers.spray) {
+      const at = project(game.markers.spray.x, game.markers.spray.z);
+      ctx.fillStyle = PALETTE.spray;
+      ctx.fillRect(at.x - 4, at.y - 4, 8, 8);
     }
-    this.drawObjectiveDiamond(ctx, toMap, G);
-    this.drawMapDots(ctx, dot, G);
-    this.drawPlayerArrow(ctx, C, G);
+    this.drawObjectiveDiamond(ctx, project, game);
+    this.drawMapDots(ctx, plot, game);
+    this.drawPlayerArrow(ctx, mid, game);
     ctx.restore();
-    ctx.strokeStyle = 'rgba(255,255,255,.4)';
+    ctx.strokeStyle = PALETTE.ring;
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.arc(C, C, C - 1, 0, Math.PI * 2);
+    ctx.arc(mid, mid, mid - 1, 0, Math.PI * 2);
     ctx.stroke();
   }
 
   // Objective marker: a pulsing yellow diamond.
-  drawObjectiveDiamond(ctx, toMap, G) {
-    if (!G.beaconTarget) return;
-    const [mx, my] = toMap(G.beaconTarget.x, G.beaconTarget.z);
-    const r = 7 + Math.sin(G.time * 5) * 2;
-    ctx.fillStyle = '#ffd23e';
+  drawObjectiveDiamond(ctx, project, game) {
+    if (!game.beaconTarget) return;
+    const at = project(game.beaconTarget.x, game.beaconTarget.z);
+    const r = 7 + Math.sin(game.time * 5) * 2;
+    const points = [
+      [at.x, at.y - r],
+      [at.x + r, at.y],
+      [at.x, at.y + r],
+      [at.x - r, at.y],
+    ];
+    ctx.fillStyle = PALETTE.beacon;
     ctx.beginPath();
-    ctx.moveTo(mx, my - r);
-    ctx.lineTo(mx + r, my);
-    ctx.lineTo(mx, my + r);
-    ctx.lineTo(mx - r, my);
+    points.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
     ctx.closePath();
     ctx.fill();
     ctx.strokeStyle = '#fff';
@@ -239,38 +265,41 @@ export class HUD {
     ctx.stroke();
   }
 
-  drawMapDots(ctx, dot, G) {
+  drawMapDots(ctx, plot, game) {
     const groups = [
-      [G.traffic, 2.5, '#e8e8e8'],
-      [G.policeCars, 3.5, '#ff4444'],
-      [G.officers, 2.5, '#ff8888'],
-      [G.peds, 1.8, '#7dff9e'],
-      [G.enemies, 3, '#ff2222'],
+      [game.traffic, 2.5, PALETTE.trafficDot],
+      [game.policeCars, 3.5, PALETTE.copDot],
+      [game.officers, 2.5, PALETTE.officerDot],
+      [game.peds, 1.8, PALETTE.pedDot],
+      [game.enemies, 3, PALETTE.enemyDot],
     ];
-    for (const [list, r, color] of groups) {
-      for (const obj of list) dot(obj.pos.x, obj.pos.z, r, color);
-    }
+    groups.forEach(([list, r, color]) => {
+      list.forEach((obj) => plot(obj.pos.x, obj.pos.z, r, color));
+    });
     // The waiting taxi fare, if any, shows as a yellow dot.
-    if (G.taxi && G.taxi.client) {
-      dot(G.taxi.client.pos.x, G.taxi.client.pos.z, 3.5, '#ffd23e');
+    if (game.taxi && game.taxi.client) {
+      plot(game.taxi.client.pos.x, game.taxi.client.pos.z, 3.5, PALETTE.fareDot);
     }
   }
 
   // Player arrow, centred, pointing along the heading (see the note at
   // the top of this file for why the rotation is PI - heading).
-  drawPlayerArrow(ctx, C, G) {
-    const heading = G.player.car ? G.player.car.heading : G.player.heading;
+  drawPlayerArrow(ctx, mid, game) {
+    const heading = game.player.car ? game.player.car.heading : game.player.heading;
     ctx.save();
-    ctx.translate(C, C);
+    ctx.translate(mid, mid);
     ctx.rotate(HUD.arrowRotation(heading));
-    ctx.fillStyle = '#fff';
-    ctx.strokeStyle = '#111';
+    ctx.fillStyle = PALETTE.arrow;
+    ctx.strokeStyle = PALETTE.arrowEdge;
     ctx.lineWidth = 1.5;
+    const outline = [
+      [0, -8],
+      [5.5, 6],
+      [0, 3],
+      [-5.5, 6],
+    ];
     ctx.beginPath();
-    ctx.moveTo(0, -8);
-    ctx.lineTo(5.5, 6);
-    ctx.lineTo(0, 3);
-    ctx.lineTo(-5.5, 6);
+    outline.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
@@ -278,6 +307,6 @@ export class HUD {
     ctx.fillStyle = '#fff';
     ctx.font = 'bold 11px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('N', C, 12);
+    ctx.fillText('N', mid, 12);
   }
 }
