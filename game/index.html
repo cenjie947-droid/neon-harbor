@@ -28,84 +28,86 @@
       <div id="mission-name"></div>
     </div>
     <div id="objective"></div>
-    <div id="crosshair" class="hidden"><div class="ch"></div><div class="ch"></div><div class="ch"></div><div class="ch"></div></div>
+    <div id="crosshair" class="hidden"><span class="ch"></span><span class="ch"></span><span class="ch"></span><span class="ch"></span></div>
     <canvas id="minimap" width="190" height="190"></canvas>
     <div id="speed" class="hidden"><span id="speed-text">0</span> mph</div>
+    <div id="car-health" class="hidden">CAR <span id="car-health-text">100</span>%</div>
     <div id="feed"></div>
     <div id="hint"></div>
     <div id="vignette"></div>
     <div id="interact" class="hidden">Press E</div>
   </div>
-  <div id="title-screen" class="overlay">
-    <div class="panel title-panel">
+  <div id="title-screen" class="screen">
+    <div class="card title-card">
       <h1>NEON <span>HARBOR</span></h1>
       <p class="tagline">A sun-soaked city. A getaway driver with nothing to lose.</p>
       <p class="story">Cole Vance just rolled into Neon Harbor with a fast car and a faster reputation.
       His fixer Mara Quinn has work. Rival boss Dario Venn wants him gone.
       Five jobs stand between Cole and the big score.</p>
-      <div class="controls-grid">
+      <div class="keys-grid">
         <div><b>W A S D</b> move / drive</div><div><b>Mouse</b> look / aim</div>
         <div><b>Shift</b> sprint</div><div><b>Space</b> jump / handbrake</div>
         <div><b>E</b> enter / exit car</div><div><b>Click</b> punch / shoot</div>
         <div><b>Q</b> switch weapon</div><div><b>R</b> flip car upright</div>
+        <div><b>F</b> Pay N Spray (on the pad)</div><div><b>T</b> pick up a taxi fare</div>
         <div><b>P / Esc</b> pause</div><div><b>M</b> mute</div>
       </div>
-      <div class="btn-row">
-        <button id="btn-start" class="btn primary">START</button>
+      <div class="row">
+        <button id="btn-start" class="btn big">START</button>
         <button id="btn-continue" class="btn hidden">CONTINUE</button>
       </div>
-      <p class="foot">Neon Harbor is an original game. No real city, person or brand appears in it.</p>
+      <p class="fine">Neon Harbor is an original game. No real city, person or brand appears in it.</p>
     </div>
   </div>
-  <div id="pause-menu" class="overlay hidden">
-    <div class="panel">
+  <div id="pause-menu" class="screen hidden">
+    <div class="card">
       <h2>PAUSED</h2>
-      <div class="btn-row col">
-        <button id="btn-resume" class="btn primary">RESUME</button>
+      <div class="row stack">
+        <button id="btn-resume" class="btn big">RESUME</button>
         <button id="btn-restart-mission" class="btn">RESTART MISSION</button>
         <button id="btn-save" class="btn">SAVE GAME</button>
         <button id="btn-quit-title" class="btn">QUIT TO TITLE</button>
       </div>
-      <p class="foot" id="pause-save-note"></p>
+      <p class="fine" id="pause-save-note"></p>
     </div>
   </div>
-  <div id="mission-panel" class="overlay hidden">
-    <div class="panel">
+  <div id="mission-panel" class="screen hidden">
+    <div class="card">
       <h2 id="mission-panel-title">MISSION COMPLETE</h2>
       <p id="mission-panel-text"></p>
       <p id="mission-panel-reward"></p>
-      <div class="btn-row"><button id="btn-mission-ok" class="btn primary">CONTINUE</button></div>
+      <div class="row"><button id="btn-mission-ok" class="btn big">CONTINUE</button></div>
     </div>
   </div>
-  <div id="busted-screen" class="overlay hidden">
-    <div class="panel danger">
+  <div id="busted-screen" class="screen hidden">
+    <div class="card danger">
       <h2>BUSTED</h2>
       <p>The Harbor PD hauled you in. You lost some cash on bail.</p>
-      <div class="btn-row"><button id="btn-busted" class="btn primary">RESPAWN</button></div>
+      <div class="row"><button id="btn-busted" class="btn big">RESPAWN</button></div>
     </div>
   </div>
-  <div id="wasted-screen" class="overlay hidden">
-    <div class="panel danger">
+  <div id="wasted-screen" class="screen hidden">
+    <div class="card danger">
       <h2>WASTED</h2>
       <p>You woke up at St. Aurelia Hospital, patched up and poorer.</p>
-      <div class="btn-row"><button id="btn-wasted" class="btn primary">RESPAWN</button></div>
+      <div class="row"><button id="btn-wasted" class="btn big">RESPAWN</button></div>
     </div>
   </div>
-  <div id="ending-screen" class="overlay hidden">
-    <div class="panel">
+  <div id="ending-screen" class="screen hidden">
+    <div class="card">
       <h2>THE BIG ONE — DONE</h2>
       <p>Cole Vance drove the Harbor Bank van clean through every roadblock Dario Venn
       could buy. Mara Quinn is already counting the take. Neon Harbor is yours now —
       keep driving, keep the heat low, and enjoy the sunset.</p>
       <p id="ending-stats"></p>
-      <div class="btn-row"><button id="btn-ending" class="btn primary">FREE ROAM</button></div>
+      <div class="row"><button id="btn-ending" class="btn big">FREE ROAM</button></div>
     </div>
   </div>
-  <div id="briefing" class="overlay hidden">
-    <div class="panel">
+  <div id="briefing" class="screen hidden">
+    <div class="card">
       <h2 id="briefing-title"></h2>
       <p id="briefing-text"></p>
-      <div class="btn-row"><button id="btn-briefing" class="btn primary">GO</button></div>
+      <div class="row"><button id="btn-briefing" class="btn big">GO</button></div>
     </div>
   </div>
 </div>

@@ -5,7 +5,7 @@
 // this file only drives them in the right order.
 //
 // Two things this file owns outright. First, the look: the city builder
-// ships a dusk-grade sunset, and this game is supposed to read as a bright,
+// ships dusk-grade light, and this game is supposed to read as a bright,
 // sun-soaked modern city, so the sun, the sky fill and the exposure are
 // lifted here after the city is built. Second, the camera: the on-foot and
 // driving rigs live in player.js and lerp toward their target, which can
@@ -21,8 +21,12 @@
 // window in the capture phase, ignores anything that hit a button or an
 // overlay, and treats a held drag as a look fallback whenever the pointer
 // is not locked.
+//
+// Pay N Spray lives here too: drive onto the pad by the kiosk, press F,
+// pay $100, and the wanted stars clear and the car comes back to full
+// health. The taxi side job's T key is wired here as well.
 import * as THREE from 'three';
-import { makeGame, clamp, collideCircle } from './state.js';
+import { makeGame, clamp, collideCircle, dist2D } from './state.js';
 import { buildCity } from './city.js';
 import { createPlayer, updatePlayer, damagePlayer } from './player.js';
 import {
@@ -48,9 +52,14 @@ import { stageShot } from './shots.js';
 const G = makeGame();
 window.__game = null;
 
-// --- renderer and light -------------------------------------------------
+// What a Pay N Spray visit costs, and how close the car has to be to the
+// pad for the prompt to appear.
+const SPRAY_COST = 100;
+const SPRAY_RADIUS = 7;
 
-function buildRenderer() {
+// --- world assembly -------------------------------------------------------
+
+function makeRenderer() {
   const canvas = document.getElementById('scene');
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: !navigator.webdriver });
   renderer.setSize(window.innerWidth, window.innerHeight);
@@ -73,7 +82,7 @@ function buildRenderer() {
 
 // The city ships dusk-grade light; lift it into a bright midday sun so the
 // streets read as a sun-soaked modern city instead of an evening haze.
-function brightenTheCity() {
+function liftTheLight() {
   if (G.sun) G.sun.intensity = 3.6;
   const skyFill = new THREE.HemisphereLight(0xbfd9ff, 0x8a7a5a, 1.5);
   G.scene.add(skyFill);
@@ -82,9 +91,59 @@ function brightenTheCity() {
   G.scene.fog = new THREE.Fog(0x9fc3e8, 220, 720);
 }
 
-// --- input ---------------------------------------------------------------
+function assembleWorld() {
+  makeRenderer();
+  buildCity(G);
+  liftTheLight();
+  createPlayer(G);
+  spawnParkedCars(G);
+  spawnTraffic(G, 14);
+  spawnPedestrians(G, 24);
+  G.audio = new AudioEngine();
+  G.hud = new HUD(G);
+  G.fx = new Effects(G);
+  G.police = new Police(G);
+  G.combat = new Combat(G);
+  G.missions = new Missions(G);
+  G.save = new SaveData();
+  bindKeys();
+  bindMenus();
+  G.camera.position.set(-60, 26, -60);
+  G.camera.lookAt(0, 4, 0);
+}
 
-function wireInput() {
+// --- Pay N Spray ----------------------------------------------------------
+
+// True when Cole is driving and sitting on the Pay N Spray pad.
+function onSprayPad(G) {
+  const p = G.player;
+  const pad = G.markers.spray;
+  return !!p.car && !!pad && dist2D(p.pos.x, p.pos.z, pad.x, pad.z) < SPRAY_RADIUS;
+}
+
+function tryPayAndSpray() {
+  const p = G.player;
+  if (!p.car || !onSprayPad(G)) return;
+  const car = p.car;
+  if (G.wanted === 0 && car.health >= car.maxHealth) {
+    G.hud.showMessage('No heat and the car is clean — nothing to pay for.');
+    return;
+  }
+  if (G.cash < SPRAY_COST) {
+    G.hud.showMessage(`Not enough cash — Pay N Spray costs $${SPRAY_COST}.`);
+    G.audio.click();
+    return;
+  }
+  G.cash -= SPRAY_COST;
+  G.police.clearWanted(G);
+  car.health = car.maxHealth;
+  G.audio.cash();
+  G.hud.showMessage(`Pay N Spray: heat cleared, car fully repaired. -$${SPRAY_COST}.`);
+}
+
+// --- input ----------------------------------------------------------------
+
+function bindKeys() {
   const input = G.input;
   window.addEventListener('keydown', (e) => {
     if (e.code === 'Space') e.preventDefault();
@@ -100,6 +159,8 @@ function wireInput() {
       G.audio.click();
     }
     if (e.code === 'KeyE' && G.mode === 'playing') tryEnterExitCar();
+    if (e.code === 'KeyF' && G.mode === 'playing') tryPayAndSpray();
+    if (e.code === 'KeyT' && G.mode === 'playing') G.missions.pickupFare(G);
     if (e.code === 'KeyR' && G.mode === 'playing' && G.player.car) {
       const car = G.player.car;
       car.speed = 0;
@@ -119,10 +180,11 @@ function wireInput() {
   window.addEventListener(
     'mousedown',
     (e) => {
-      if (e.target && e.target.closest && e.target.closest('button, .overlay')) return;
+      if (e.target && e.target.closest && e.target.closest('button, .screen')) return;
       if (G.mode !== 'playing') return;
       dragging = true;
-      canvas.requestPointerLock?.();
+      const lock = canvas.requestPointerLock?.();
+      if (lock && lock.catch) lock.catch(() => {});
       if (e.button === 0) G.combat.attack(G);
     },
     true,
@@ -174,38 +236,40 @@ function togglePause() {
   }
 }
 
-// --- menus ---------------------------------------------------------------
+// --- menus ----------------------------------------------------------------
 
-function wireMenus() {
+function bindMenus() {
   const $ = (id) => document.getElementById(id);
+  const on = (id, fn) => $(id).addEventListener('click', fn);
+  const clickSound = () => G.audio.click();
   if (G.save.load()) $('btn-continue').classList.remove('hidden');
-  $('btn-start').addEventListener('click', () => {
+  on('btn-start', () => {
     G.audio.ensure();
-    G.audio.click();
-    startGame(0, false);
+    clickSound();
+    beginGame(0, false);
   });
-  $('btn-continue').addEventListener('click', () => {
+  on('btn-continue', () => {
     G.audio.ensure();
-    G.audio.click();
-    startGame(null, true);
+    clickSound();
+    beginGame(null, true);
   });
-  $('btn-resume').addEventListener('click', () => {
-    G.audio.click();
+  on('btn-resume', () => {
+    clickSound();
     togglePause();
   });
-  $('btn-restart-mission').addEventListener('click', () => {
-    G.audio.click();
+  on('btn-restart-mission', () => {
+    clickSound();
     $('pause-menu').classList.add('hidden');
     G.missions.startMission(G, G.missionIndex, false);
     G.mode = 'playing';
     G.hud.showMessage('Mission restarted.');
   });
-  $('btn-save').addEventListener('click', () => {
+  on('btn-save', () => {
     const ok = G.save.save(G);
     $('pause-save-note').textContent = ok ? 'Saved.' : 'Save failed (browser storage unavailable).';
   });
-  $('btn-quit-title').addEventListener('click', () => {
-    G.audio.click();
+  on('btn-quit-title', () => {
+    clickSound();
     G.save.save(G);
     $('pause-menu').classList.add('hidden');
     G.mode = 'title';
@@ -213,36 +277,36 @@ function wireMenus() {
     G.hud.hide();
     if (G.save.load()) $('btn-continue').classList.remove('hidden');
   });
-  $('btn-mission-ok').addEventListener('click', () => {
-    G.audio.click();
+  on('btn-mission-ok', () => {
+    clickSound();
     $('mission-panel').classList.add('hidden');
     G.mode = 'playing';
     G.missions.startMission(G, G.missionIndex, true);
   });
-  $('btn-busted').addEventListener('click', () => {
-    G.audio.click();
+  on('btn-busted', () => {
+    clickSound();
     G.missions.respawn(G);
   });
-  $('btn-wasted').addEventListener('click', () => {
-    G.audio.click();
+  on('btn-wasted', () => {
+    clickSound();
     G.missions.respawn(G);
   });
-  $('btn-ending').addEventListener('click', () => {
-    G.audio.click();
+  on('btn-ending', () => {
+    clickSound();
     $('ending-screen').classList.add('hidden');
     G.mode = 'playing';
     G.missions.setFreeRoam(G);
   });
-  $('btn-briefing').addEventListener('click', () => {
-    G.audio.click();
+  on('btn-briefing', () => {
+    clickSound();
     $('briefing').classList.add('hidden');
     G.mode = 'playing';
   });
 }
 
-// --- starting and continuing ---------------------------------------------
+// --- starting and continuing ----------------------------------------------
 
-function startGame(missionIndex, useSave) {
+function beginGame(missionIndex, useSave) {
   document.getElementById('title-screen').classList.add('hidden');
   G.hud.show();
   let startMission = missionIndex ?? 0;
@@ -265,7 +329,7 @@ function startGame(missionIndex, useSave) {
   }
   G.mode = 'playing';
   G.missions.startMission(G, startMission, true, resumeStep);
-  snapCameraBehindPlayer();
+  placeCameraBehind();
   G.hud.showMessage(resumeNote ? `Welcome back, Cole. ${resumeNote}` : 'Welcome to Neon Harbor, Cole.');
 }
 
@@ -273,7 +337,7 @@ function startGame(missionIndex, useSave) {
 // from wherever the camera currently is; after a Continue that used to be
 // the title orbit on the far side of the city, and the lerp path cut
 // straight through buildings. Starting from a legal spot fixes both.
-function snapCameraBehindPlayer() {
+function placeCameraBehind() {
   const p = G.player;
   const back = p.heading + Math.PI;
   const x = p.pos.x + Math.sin(back) * 8;
@@ -283,36 +347,13 @@ function snapCameraBehindPlayer() {
   G.camera.lookAt(p.pos.x, 1.7, p.pos.z);
 }
 
-// --- world ---------------------------------------------------------------
-
-function buildWorld() {
-  buildRenderer();
-  buildCity(G);
-  brightenTheCity();
-  createPlayer(G);
-  spawnParkedCars(G);
-  spawnTraffic(G, 14);
-  spawnPedestrians(G, 24);
-  G.audio = new AudioEngine();
-  G.hud = new HUD(G);
-  G.fx = new Effects(G);
-  G.police = new Police(G);
-  G.combat = new Combat(G);
-  G.missions = new Missions(G);
-  G.save = new SaveData();
-  wireInput();
-  wireMenus();
-  G.camera.position.set(-60, 26, -60);
-  G.camera.lookAt(0, 4, 0);
-}
-
-// --- camera keep-out ------------------------------------------------------
+// --- camera keep-out -------------------------------------------------------
 
 // The camera rig lerps, so it can end a frame inside a wall even though its
 // target is legal. Push it back out: first horizontally out of any building
 // footprint, then along the sight line from the player — walk from the
 // player toward the camera and stop just before the first blocked sample.
-function keepCameraClear() {
+function clearCamera() {
   const cam = G.camera;
   const pushed = collideCircle(G, cam.position.x, cam.position.z, 1.2);
   cam.position.x = pushed.x;
@@ -337,9 +378,9 @@ function keepCameraClear() {
   if (cam.position.y < 1.5) cam.position.y = 1.5;
 }
 
-// --- per-frame update ------------------------------------------------------
+// --- per-frame update -------------------------------------------------------
 
-function updateAmbient(dt) {
+function tickAmbient(dt) {
   if (G.sea) G.sea.position.y = 0.12 + Math.sin(G.time * 0.7) * 0.05;
   if (G.ferris) G.ferris.children[0].rotation.z += dt * 0.15;
   if (G.beacon && G.beacon.visible) {
@@ -348,20 +389,59 @@ function updateAmbient(dt) {
   }
 }
 
-function update(dt) {
+// The interact prompt: steal on foot, Pay N Spray while driving on the
+// pad, taxi pickup next to a waiting fare. One prompt at a time, in that
+// order of priority.
+function refreshPrompt() {
+  const prompt = document.getElementById('interact');
+  const p = G.player;
+  const taxi = G.taxi;
+  const fareNear =
+    taxi.phase === 'wait' &&
+    taxi.client &&
+    dist2D(p.pos.x, p.pos.z, taxi.client.pos.x, taxi.client.pos.z) < 4;
+  if (!p.car) {
+    const car = nearestCar(G, p.pos, STEAL_REACH);
+    if (car) {
+      prompt.textContent = `Press E — steal the ${car.name}`;
+      prompt.classList.remove('hidden');
+      return;
+    }
+    if (fareNear) {
+      prompt.textContent = 'Press T — pick up the fare';
+      prompt.classList.remove('hidden');
+      return;
+    }
+    prompt.classList.add('hidden');
+    return;
+  }
+  if (onSprayPad(G)) {
+    prompt.textContent = `Press F — Pay N Spray ($${SPRAY_COST}): clear heat + repair`;
+    prompt.classList.remove('hidden');
+    return;
+  }
+  if (fareNear) {
+    prompt.textContent = 'Press T — pick up the fare';
+    prompt.classList.remove('hidden');
+    return;
+  }
+  prompt.classList.add('hidden');
+}
+
+function tick(dt) {
   G.time += dt;
-  updateAmbient(dt);
+  tickAmbient(dt);
   if (G.mode === 'title') {
     const a = G.time * 0.03;
     G.camera.position.set(Math.sin(a) * 120, 42, Math.cos(a) * 120);
     G.camera.lookAt(0, 6, 0);
     updateTraffic(G, dt);
     updatePedestrians(G, dt);
-    drawFrame();
+    paint();
     return;
   }
   if (G.mode !== 'playing') {
-    drawFrame();
+    paint();
     return;
   }
   updatePlayer(G, dt);
@@ -371,33 +451,25 @@ function update(dt) {
   G.police.update(G, dt);
   G.combat.update(G, dt);
   G.missions.update(G, dt);
+  G.missions.updateTaxi(G, dt);
   G.fx.update(dt);
   G.hud.update(G, dt);
-  const p = G.player;
-  const prompt = document.getElementById('interact');
-  if (!p.car) {
-    const car = nearestCar(G, p.pos, STEAL_REACH);
-    if (car) {
-      prompt.textContent = `Press E — steal the ${car.name}`;
-      prompt.classList.remove('hidden');
-    } else {
-      prompt.classList.add('hidden');
-    }
-  } else {
-    prompt.classList.add('hidden');
-  }
-  keepCameraClear();
-  drawFrame();
+  refreshPrompt();
+  clearCamera();
+  paint();
 }
 
-function drawFrame() {
+function paint() {
   if (G._render !== false) G.renderer.render(G.scene, G.camera);
 }
 
 // --- debug handle and main loop --------------------------------------------
 
-function exposeDebugHandle() {
-  window.__game = {
+function publishDebug() {
+  const p = G.player;
+  // Read-only snapshots for tests, plus the handful of actions a test
+  // needs (teleport, start a mission, step the loop, press a key).
+  const handle = {
     get mode() {
       return G.mode;
     },
@@ -414,19 +486,22 @@ function exposeDebugHandle() {
       return G.missionStep;
     },
     get driving() {
-      return !!G.player.car;
+      return !!p.car;
     },
     get health() {
-      return G.player.health;
+      return p.health;
+    },
+    get carHealth() {
+      return p.car ? p.car.health : null;
     },
     get ammo() {
-      return G.player.ammo;
+      return p.ammo;
     },
     get weapon() {
-      return G.player.weapon;
+      return p.weapon;
     },
     get pos() {
-      return { x: G.player.pos.x, y: G.player.pos.y, z: G.player.pos.z };
+      return { x: p.pos.x, y: p.pos.y, z: p.pos.z };
     },
     get cars() {
       return G.cars.length;
@@ -444,21 +519,27 @@ function exposeDebugHandle() {
       return G.enemies.length;
     },
     get carName() {
-      return G.player.car ? G.player.car.name : null;
+      return p.car ? p.car.name : null;
+    },
+    get taxiPhase() {
+      return G.taxi.phase;
+    },
+    get taxiFare() {
+      return G.taxi.fare;
     },
     get cameraLocked() {
       return document.pointerLockElement === document.getElementById('scene');
     },
     teleport(x, z) {
-      G.player.pos.set(x, 0, z);
-      if (G.player.car) G.player.car.pos.set(x, 0, z);
+      p.pos.set(x, 0, z);
+      if (p.car) p.car.pos.set(x, 0, z);
     },
     startMission(i) {
       G.missions.startMission(G, i, false);
       G.mode = 'playing';
     },
     step(dt) {
-      update(dt || 0.05);
+      tick(dt || 0.05);
     },
     setRender(on) {
       G.renderEnabled = !!on;
@@ -468,13 +549,19 @@ function exposeDebugHandle() {
       if (down) G.input.keys.add(code);
       else G.input.keys.delete(code);
     },
+    // Test-only hook: hurt Cole through the real damage path (invuln,
+    // vignette, wasted flow) without staging an enemy.
+    hurt(amount) {
+      damagePlayer(G, amount, 'test');
+    },
     G,
   };
+  window.__game = handle;
 }
 
-function main() {
-  buildWorld();
-  exposeDebugHandle();
+function boot() {
+  assembleWorld();
+  publishDebug();
   window.__shotReady = false;
   const params = new URLSearchParams(location.search);
   const shot = params.get('shot');
@@ -495,7 +582,7 @@ function main() {
     const t0 = performance.now();
     G._render = wantRender;
     try {
-      update(dt);
+      tick(dt);
     } catch (err) {
       console.error('update error', err);
       if (wantRender) G.renderer.render(G.scene, G.camera);
@@ -512,4 +599,4 @@ function main() {
   loop();
 }
 
-main();
+boot();

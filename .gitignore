@@ -1,2 +1,3 @@
+# Build output from the make.fun entry program, and local Node packages.
 out/
 node_modules/

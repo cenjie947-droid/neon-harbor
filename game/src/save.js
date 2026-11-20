@@ -1,34 +1,48 @@
-// Neon Harbor — save game in localStorage. A save records the whole
-// playable situation, not just a bookmark: which job is running and which
-// beat inside it, where Cole stands, how much health and cash he has, what
-// he is carrying, and — the part that used to be lost — the car he is
-// driving, down to its model, colour, spot and heading. Continue rebuilds
-// that situation. When a piece of it genuinely cannot be rebuilt (the car
-// is gone from the world, the beat no longer exists), Continue says so on
-// screen and restarts the current job cleanly from its first beat instead
-// of silently dropping the player mid-job with no car and no explanation.
+// Neon Harbor — saving to localStorage. A save is a full snapshot of the
+// playable situation, not a bookmark: the job in progress and the beat
+// inside it, where Cole stands, his health, ammo and cash, and — the part
+// that used to be lost — the car he is driving, down to model, colour,
+// spot, heading and health. Continue rebuilds that situation. If a piece
+// genuinely cannot be rebuilt (the car is gone from the world, the beat
+// no longer exists), Continue says so on screen and restarts the current
+// job from its first beat instead of silently dropping the player mid-job
+// with no car and no explanation.
 import { collideCircle } from './state.js';
 import { MISSIONS } from './missions.js';
 import { enterCar } from './vehicles.js';
 
-const KEY = 'neon-harbor-save-v1';
+const SAVE_KEY = 'neon-harbor-save-v1';
 const SAVE_VERSION = 1;
 
-// Jobs whose final beat is a countdown restart that countdown from the full
+// A beat that is a countdown restarts its countdown from the full
 // allowance when reloaded mid-beat; a half-spent timer restored from a save
 // would strand the player with no time to finish.
-function beatNeedsFullTimer(index, step) {
+function needsFreshTimer(index, step) {
   const job = MISSIONS[index];
   if (!job) return false;
   const beat = job.steps[step];
   return !!beat && beat.type === 'timed';
 }
 
+function snapshotCar(car) {
+  return {
+    x: car.pos.x,
+    z: car.pos.z,
+    heading: car.heading,
+    name: car.name,
+    color: car.color,
+    isVan: !!car.isVan,
+    special: car.special || null,
+    stolen: !!car.stolen,
+    health: car.health,
+  };
+}
+
 export class SaveData {
-  load() {
+  read() {
     let raw = null;
     try {
-      raw = localStorage.getItem(KEY);
+      raw = localStorage.getItem(SAVE_KEY);
     } catch (e) {
       return null;
     }
@@ -43,95 +57,112 @@ export class SaveData {
     return data;
   }
 
-  save(G) {
-    const snapshot = {
+  load() {
+    return this.read();
+  }
+
+  write(G) {
+    const p = G.player;
+    const snap = {
       version: SAVE_VERSION,
       savedAt: Date.now(),
       cash: G.cash,
       missionIndex: Math.min(G.missionIndex, MISSIONS.length - 1),
       missionStep: G.missionStep || 0,
       missionTimer: G.missionTimer || 0,
-      pos: { x: G.player.pos.x, z: G.player.pos.z },
-      heading: G.player.heading || 0,
-      health: G.player.health,
-      ammo: G.player.ammo,
-      weapon: G.player.weapon,
+      pos: { x: p.pos.x, z: p.pos.z },
+      heading: p.heading || 0,
+      health: p.health,
+      ammo: p.ammo,
+      weapon: p.weapon,
       wanted: G.wanted,
     };
-    const car = G.player.car;
-    if (car) {
-      snapshot.car = {
-        x: car.pos.x,
-        z: car.pos.z,
-        heading: car.heading,
-        name: car.name,
-        color: car.color,
-        isVan: !!car.isVan,
-        special: car.special || null,
-        stolen: !!car.stolen,
-      };
-    }
+    if (p.car) snap.car = snapshotCar(p.car);
     try {
-      localStorage.setItem(KEY, JSON.stringify(snapshot));
+      localStorage.setItem(SAVE_KEY, JSON.stringify(snap));
       return true;
     } catch (e) {
       return false;
     }
   }
 
+  save(G) {
+    return this.write(G);
+  }
+
   // Rebuild the saved situation. Returns what Continue needs to know:
   // the job and beat to resume, whether the saved car came back, and a
   // plain-language note when anything fell short, so the caller can put
   // that note on screen instead of pretending the restore was perfect.
-  apply(G, data) {
+  restore(G, data) {
+    this.restoreVitals(G, data);
+    const jobResult = this.restoreJob(G, data);
+    const { index, step, note: carNote, carRestored } = jobResult;
+    this.restorePosition(G, data);
+    const timerNote = this.restoreTimer(G, data, index, step);
+    const notes = [carNote, timerNote].filter(Boolean).join(' ');
+    return { index, step, carRestored, carLost: !carRestored && !!data.car, note: notes };
+  }
+
+  // Health, ammo, weapon and cash, and a clean slate on the heat: reloading
+  // into an active police chase the player cannot see yet reads as an
+  // ambush, not a continuation.
+  restoreVitals(G, data) {
     G.cash = data.cash || 0;
     G.player.health = data.health > 0 ? data.health : 100;
     G.player.ammo = typeof data.ammo === 'number' ? data.ammo : G.player.ammo;
     if (data.weapon === 'fists' || data.weapon === 'pistol') G.player.weapon = data.weapon;
-    // Always come back clean: reloading into an active police chase the
-    // player cannot see yet reads as an ambush, not a continuation.
     G.wanted = 0;
     G.heatTimer = 0;
+  }
 
+  // Which job and beat to resume, and the saved car if there was one. A
+  // beat that needs the car (drive / deliver) cannot resume on foot, so a
+  // lost car restarts the job from its first beat — and the player is told
+  // why.
+  restoreJob(G, data) {
     const index = Math.max(0, Math.min(data.missionIndex || 0, MISSIONS.length - 1));
     const job = MISSIONS[index];
     const lastBeat = job ? job.steps.length - 1 : 0;
     let step = Number.isInteger(data.missionStep) ? data.missionStep : 0;
     step = Math.max(0, Math.min(step, lastBeat));
-
-    const notes = [];
+    let note = '';
     let carRestored = false;
-    let carLost = false;
     if (data.car) {
-      carRestored = this.restoreCar(G, data.car);
+      carRestored = this.recoverCar(G, data.car);
       if (!carRestored) {
-        carLost = true;
-        // A beat that needs the car (drive / deliver) cannot resume on
-        // foot, so the job restarts from its first beat and the player is
-        // told why.
         step = 0;
-        notes.push("Your car couldn't be recovered — mission restarted from the top.");
+        note = "Your car couldn't be recovered — mission restarted from the top.";
       }
     }
+    return { index, step, note, carRestored };
+  }
 
-    if (data.pos) {
-      // Never reload inside a wall: nudge the saved spot out of any
-      // building footprint before standing the player there.
-      const clear = collideCircle(G, data.pos.x, data.pos.z, 0.6);
-      G.player.pos.set(clear.x, 0, clear.z);
-      G.player.heading = typeof data.heading === 'number' ? data.heading : 0;
-      G.player.mesh.position.copy(G.player.pos);
-      G.player.mesh.rotation.y = G.player.heading;
-    }
+  // Where Cole stands: never reload inside a wall — nudge the saved spot
+  // out of any building footprint before standing the player there.
+  restorePosition(G, data) {
+    if (!data.pos) return;
+    const clear = collideCircle(G, data.pos.x, data.pos.z, 0.6);
+    G.player.pos.set(clear.x, 0, clear.z);
+    G.player.heading = typeof data.heading === 'number' ? data.heading : 0;
+    G.player.mesh.position.copy(G.player.pos);
+    G.player.mesh.rotation.y = G.player.heading;
+  }
 
-    if (beatNeedsFullTimer(index, step)) {
+  restoreTimer(G, data, index, step) {
+    const job = MISSIONS[index];
+    if (needsFreshTimer(index, step)) {
       G.missionTimer = job.steps[step].seconds;
-      notes.push('The pickup timer restarted at 90 seconds.');
-    } else if (typeof data.missionTimer === 'number') {
+      return 'The pickup timer restarted at 90 seconds.';
+    }
+    if (typeof data.missionTimer === 'number') {
       G.missionTimer = data.missionTimer;
     }
+    return '';
+  }
 
-    return { index, step, carRestored, carLost, note: notes.join(' ') };
+  apply(G, data) {
+    return this.restore(G, data);
   }
 
   // Put the player back into the car they were driving when they saved.
@@ -140,15 +171,16 @@ export class SaveData {
   // then any parked car nearby, then any parked car at all. The car is
   // moved to the exact saved spot and heading, and marked already stolen
   // so getting back in does not raise the wanted level a second time.
-  restoreCar(G, saved) {
+  recoverCar(G, saved) {
     let car = null;
     if (saved.special) car = G.cars.find((c) => c.special === saved.special) || null;
-    if (!car) car = this.findParkedNear(G, saved, true) || this.findParkedNear(G, saved, false);
+    if (!car) car = this.findParked(G, saved, true) || this.findParked(G, saved, false);
     if (!car) car = G.cars.find((c) => c.parked && !c.isPolice) || null;
     if (!car) return false;
     car.pos.set(saved.x, 0, saved.z);
     car.heading = saved.heading || 0;
     car.speed = 0;
+    car.health = typeof saved.health === 'number' ? saved.health : 100;
     car.mesh.position.copy(car.pos);
     car.mesh.rotation.y = car.heading;
     enterCar(G, car);
@@ -156,7 +188,7 @@ export class SaveData {
     return true;
   }
 
-  findParkedNear(G, saved, sameModel) {
+  findParked(G, saved, sameModel) {
     let best = null;
     let bestDist = 80;
     for (const c of G.cars) {
@@ -173,7 +205,7 @@ export class SaveData {
 
   exists() {
     try {
-      return !!localStorage.getItem(KEY);
+      return !!localStorage.getItem(SAVE_KEY);
     } catch (e) {
       return false;
     }
@@ -181,7 +213,7 @@ export class SaveData {
 
   clear() {
     try {
-      localStorage.removeItem(KEY);
+      localStorage.removeItem(SAVE_KEY);
     } catch (e) {
       // Storage unavailable — nothing to clear.
     }

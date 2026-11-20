@@ -26,6 +26,20 @@ cars and pedestrians fill the streets; police cars and foot officers respond to 
 wanted level (0–5 stars); fists and a pistol, health pickups by ammo drops, a HUD
 with a live minimap, a start screen, pause menu, and a localStorage save.
 
+## Pay N Spray, car damage, taxi fares
+
+Cars take damage now. Hard crashes and police rams dent them: below 60 health a car
+loses speed and acceleration, below 35 it trails smoke, at 0 it is disabled and will
+not move. The only fix is the **Pay N Spray** garage on the east side of the city
+(blue square on the minimap, yellow awning over the pad): drive onto the pad and
+press **F** to pay **$100** — all wanted stars clear and the car comes back to full
+health. The HUD shows the driven car's condition next to the speedometer.
+
+In free roam, a **taxi side job** runs in the background: a walker with a yellow
+diamond over their head is waiting for a ride. Walk up and press **T** to pick them
+up, follow the beacon to their destination, and collect a $40–$80 fare. Fares keep
+coming, so it is a repeatable way to earn cash between jobs.
+
 ## How to play
 
 | Key | Action |
@@ -38,13 +52,15 @@ with a live minimap, a start screen, pause menu, and a localStorage save.
 | Click | Punch / shoot |
 | Q | Switch weapon (fists / pistol) |
 | R | Flip a car upright |
+| F | Pay N Spray (drive onto the pad first) |
+| T | Pick up a taxi fare (free roam) |
 | P / Esc | Pause |
 | M | Mute |
 
 Crimes raise your wanted level: stealing cars, hitting pedestrians, shooting, and
-attacking police. Lay low and the heat fades. Get caught on foot and you're BUSTED;
-lose all your health and you're WASTED — either way you respawn at the hideout
-with a smaller wallet.
+attacking police. Lay low and the heat fades — or pay it off at the Pay N Spray.
+Get caught on foot and you're BUSTED; lose all your health and you're WASTED —
+either way you respawn at the hideout with a smaller wallet.
 
 ## How to run it
 

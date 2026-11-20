@@ -1,73 +1,95 @@
-// Neon Harbor — the story arc: five jobs Cole Vance runs for his fixer Mara
-// Quinn while rival boss Dario Venn tries to shut him down. Every job is a
-// short chain of beats (steal, drive, pick up, survive, deliver); each beat
-// knows how to tell when it is done, and the chain drives the beacon, the
-// briefing card, the timer and the payout. Payouts are fixed per job and the
-// completion card always reads its two numbers from the same ledger, so the
-// reward and the running total can never disagree.
-import { dist2D } from './state.js';
+// Neon Harbor — the story arc: five jobs Cole Vance runs for his fixer
+// Mara Quinn while rival boss Dario Venn tries to shut him down. Every job
+// is a short chain of beats (steal, drive, pick up, survive, deliver); each
+// beat knows how to tell when it is done, and the chain drives the beacon,
+// the briefing card, the timer and the payout. Payouts are fixed per job
+// and the completion card always reads its two numbers from the same
+// ledger, so the reward and the running total can never disagree.
+//
+// Free roam also has a taxi side job (see the Taxi section at the bottom):
+// pick up a marked walker, drive them where they want to go, collect the
+// fare. It is repeatable and never blocks the story.
+import { dist2D, randInt, pick } from './state.js';
+import { markTaxiClient, unmarkTaxiClient } from './pedestrians.js';
 
-// One entry per job, in story order. `reward` is what the job pays on top of
-// whatever the player already holds; `steps` run in order and the chain ends
-// when the last one reports done.
-export const MISSIONS = [
-  {
-    name: 'First Wheels',
-    reward: 150,
-    briefing:
-      'Mara Quinn: "Cole, welcome to Neon Harbor. First job is simple — grab any car on the street and bring it to the paint shop on Harbor Row. Don\'t scratch it. Actually, scratch it. I don\'t care."',
-    steps: [
-      { type: 'steal', text: 'Steal any car — walk up to one and press E' },
-      { type: 'drive', target: 'paintShop', radius: 8, text: 'Drive the car to the paint shop' },
+// Job data is written as compact rows — [name, reward, briefing, beats] —
+// and normalised into objects at load time, so the story table stays
+// readable without a wall of object literals. A beat row is
+// [type, text, target, radius, seconds, wanted, car]; unused slots are null.
+const JOB_ROWS = [
+  [
+    'First Wheels',
+    150,
+    'Mara Quinn: "Cole, welcome to Neon Harbor. First job is simple — grab any car on the street and bring it to the paint shop on Harbor Row. Don\'t scratch it. Actually, scratch it. I don\'t care."',
+    [
+      ['steal', 'Steal any car — walk up to one and press E', null, 0, 0, 0, null],
+      ['drive', 'Drive the car to the paint shop', 'paintShop', 8, 0, 0, null],
     ],
-  },
-  {
-    name: 'The Pickup',
-    reward: 300,
-    briefing:
-      'Mara Quinn: "A package is waiting at the docks, Pier 9. Pick it up on foot, then get it back to my garage. Fast. The harbor cops get nosy after dark."',
-    steps: [
-      { type: 'drive', target: 'docks', radius: 9, text: 'Drive to the docks' },
-      { type: 'pickup', target: 'docks', radius: 5, text: 'Get out and grab the package' },
-      { type: 'timed', target: 'garage', radius: 9, seconds: 90, text: "Get the package to Mara's garage — 90 seconds!" },
+  ],
+  [
+    'The Pickup',
+    300,
+    'Mara Quinn: "A package is waiting at the docks, Pier 9. Pick it up on foot, then get it back to my garage. Fast. The harbor cops get nosy after dark."',
+    [
+      ['drive', 'Drive to the docks', 'docks', 9, 0, 0, null],
+      ['pickup', 'Get out and grab the package', 'docks', 5, 0, 0, null],
+      ['timed', "Get the package to Mara's garage — 90 seconds!", 'garage', 9, 90, 0, null],
     ],
-  },
-  {
-    name: 'Grand Theft Harbor',
-    reward: 600,
-    briefing:
-      'Mara Quinn: "A yellow Comet GT is sitting in the showroom lot on Meridian. Dario Venn wants it too, so the cops will be all over you the second you take it. Steal it. Bring it to the garage."',
-    steps: [
-      { type: 'stealSpecific', car: 'comet', text: 'Steal the yellow Comet GT from the showroom lot' },
-      { type: 'drive', target: 'garage', radius: 9, text: 'Lose the heat and deliver the Comet GT to the garage', wanted: 2 },
+  ],
+  [
+    'Grand Theft Harbor',
+    600,
+    'Mara Quinn: "A yellow Comet GT is sitting in the showroom lot on Meridian. Dario Venn wants it too, so the cops will be all over you the second you take it. Steal it. Bring it to the garage."',
+    [
+      ['stealSpecific', 'Steal the yellow Comet GT from the showroom lot', null, 0, 0, 0, 'comet'],
+      ['drive', 'Lose the heat and deliver the Comet GT to the garage', 'garage', 9, 0, 2, null],
     ],
-  },
-  {
-    name: 'Dockside Heat',
-    reward: 900,
-    briefing:
-      'Mara Quinn: "Venn\'s crew is holding my warehouse on the east docks. Go in loud. Take them all down, then get back to the hideout before the PD locks the whole pier down."',
-    steps: [
-      { type: 'goto', target: 'warehouse', radius: 10, text: 'Go to the warehouse on the east docks' },
-      { type: 'ambush', text: "Take down Venn's crew" },
-      { type: 'goto', target: 'hideout', radius: 9, text: 'Escape to the hideout' },
+  ],
+  [
+    'Dockside Heat',
+    900,
+    'Mara Quinn: "Venn\'s crew is holding my warehouse on the east docks. Go in loud. Take them all down, then get back to the hideout before the PD locks the whole pier down."',
+    [
+      ['goto', 'Go to the warehouse on the east docks', 'warehouse', 10, 0, 0, null],
+      ['ambush', "Take down Venn's crew", null, 0, 0, 0, null],
+      ['goto', 'Escape to the hideout', 'hideout', 9, 0, 0, null],
     ],
-  },
-  {
-    name: 'The Big One',
-    reward: 2500,
-    briefing:
-      'Mara Quinn: "This is it, Cole. The Harbor Bank van leaves at dusk. Take the van, punch through every roadblock Venn bought, and bring it to the hideout. Do this and we own this city."',
-    steps: [
-      { type: 'enterSpecific', car: 'bankvan', text: 'Take the armored bank van' },
-      { type: 'drive', target: 'hideout', radius: 10, text: 'Drive the van to the hideout — through the roadblocks!', wanted: 4 },
+  ],
+  [
+    'The Big One',
+    2500,
+    'Mara Quinn: "This is it, Cole. The Harbor Bank van leaves at dusk. Take the van, punch through every roadblock Venn bought, and bring it to the hideout. Do this and we own this city."',
+    [
+      ['enterSpecific', 'Take the armored bank van', null, 0, 0, 0, 'bankvan'],
+      ['drive', 'Drive the van to the hideout — through the roadblocks!', 'hideout', 10, 0, 4, null],
     ],
-  },
+  ],
 ];
 
-// How close the player (or their car) has to be to a marker for a beat to
-// count. Kept on the step so a beat can ask for a wider net than the default.
-function nearMarker(G, name, radius) {
+function normaliseJobs(rows) {
+  return rows.map(([name, reward, briefing, beats]) => ({
+    name,
+    reward,
+    briefing,
+    steps: beats.map(([type, text, target, radius, seconds, wanted, car]) => ({
+      type,
+      text,
+      target,
+      radius,
+      seconds,
+      wanted,
+      car,
+    })),
+  }));
+}
+
+// One entry per job, in story order. `reward` is what the job pays on top
+// of whatever Cole already holds; `steps` run in order and the chain ends
+// when the last one reports done.
+export const MISSIONS = normaliseJobs(JOB_ROWS);
+
+// How close Cole (or his car) has to be to a marker for a beat to count.
+function atSpot(G, name, radius) {
   const spot = G.markers[name];
   if (!spot) return false;
   return dist2D(G.player.pos.x, G.player.pos.z, spot.x, spot.z) < radius;
@@ -77,7 +99,7 @@ function nearMarker(G, name, radius) {
 // 'fail' when it has blown its condition (only the timed beat can fail),
 // anything else means "still in progress". The per-frame driver in
 // Missions.update calls exactly one checker per frame.
-const BEAT_CHECKS = {
+const BEAT_RULES = {
   steal(G) {
     return G.player.car ? 'done' : null;
   },
@@ -90,13 +112,13 @@ const BEAT_CHECKS = {
     return car && car.special === step.car ? 'done' : null;
   },
   goto(G, step) {
-    return nearMarker(G, step.target, step.radius) ? 'done' : null;
+    return atSpot(G, step.target, step.radius) ? 'done' : null;
   },
   drive(G, step) {
-    return G.player.car && nearMarker(G, step.target, step.radius) ? 'done' : null;
+    return G.player.car && atSpot(G, step.target, step.radius) ? 'done' : null;
   },
   pickup(G, step) {
-    if (G.player.car || !nearMarker(G, step.target, step.radius)) return null;
+    if (G.player.car || !atSpot(G, step.target, step.radius)) return null;
     G.hud.showMessage('Package secured. The cops noticed — go!');
     G.police.addWanted(G, 1, 'You grabbed the package!');
     return 'done';
@@ -106,14 +128,28 @@ const BEAT_CHECKS = {
     const left = Math.max(0, Math.ceil(G.missionTimer));
     G.hud.setObjective(`${step.text} — ${left}s`);
     if (G.missionTimer <= 0) return 'fail';
-    return G.player.car && nearMarker(G, step.target, step.radius) ? 'done' : null;
+    return G.player.car && atSpot(G, step.target, step.radius) ? 'done' : null;
   },
   ambush(G) {
-    // The ambush beat is armed by applyStep; it ends when the last gunman
+    // The ambush beat is armed by setupBeat; it ends when the last gunman
     // is down. The live enemy list is the source of truth.
     return G.enemies.length === 0 ? 'done' : null;
   },
 };
+
+// Taxi destinations: named markers a fare might ask for, with the label
+// the HUD shows.
+const TAXI_SPOTS = [
+  { key: 'garage', label: "Mara's garage" },
+  { key: 'paintShop', label: 'the paint shop' },
+  { key: 'docks', label: 'the docks' },
+  { key: 'beach', label: 'the beach' },
+  { key: 'hospital', label: 'St. Aurelia Hospital' },
+  { key: 'bank', label: 'Harbor Bank' },
+  { key: 'showroom', label: 'the showroom lot' },
+  { key: 'hideout', label: 'the hideout' },
+  { key: 'spray', label: 'the Pay N Spray' },
+];
 
 export class Missions {
   constructor(G) {
@@ -128,6 +164,17 @@ export class Missions {
   currentBeat() {
     const job = this.current();
     return job ? job.steps[this.G.missionStep] || null : null;
+  }
+
+  update(G, dt) {
+    if (!G.missionActive || G.mode !== 'playing') return;
+    const beat = this.currentBeat();
+    if (!beat) return;
+    const check = BEAT_RULES[beat.type];
+    if (!check) return;
+    const result = check(G, beat, dt);
+    if (result === 'done') this.advance(G);
+    else if (result === 'fail') this.failMission(G, 'Too slow — the package window closed');
   }
 
   // (Re)start a job, optionally mid-chain. `showBriefing` pops Mara's card
@@ -152,13 +199,13 @@ export class Missions {
       document.getElementById('briefing-text').textContent = job.briefing;
       document.getElementById('briefing').classList.remove('hidden');
     }
-    this.applyStep(G);
+    this.setupBeat(G);
   }
 
   // Point the HUD and the beacon at the current beat, and run the beat's
   // one-time setup: spawn the ambush crew, floor the wanted level, arm the
   // countdown. Called on start and on every advance.
-  applyStep(G) {
+  setupBeat(G) {
     const beat = this.currentBeat();
     if (!beat) return;
     G.hud.setObjective(beat.text);
@@ -190,6 +237,10 @@ export class Missions {
     if (beat.type === 'timed') G.missionTimer = beat.seconds;
   }
 
+  applyStep(G) {
+    this.setupBeat(G);
+  }
+
   setFreeRoam(G) {
     G.missionActive = false;
     G.missionIndex = MISSIONS.length;
@@ -208,7 +259,7 @@ export class Missions {
     if (G.missionStep >= job.steps.length) {
       this.completeMission(G);
     } else {
-      this.applyStep(G);
+      this.setupBeat(G);
       G.audio.chime();
     }
   }
@@ -265,17 +316,6 @@ export class Missions {
     G.mode = 'playing';
   }
 
-  update(G, dt) {
-    if (!G.missionActive || G.mode !== 'playing') return;
-    const beat = this.currentBeat();
-    if (!beat) return;
-    const check = BEAT_CHECKS[beat.type];
-    if (!check) return;
-    const result = check(G, beat, dt);
-    if (result === 'done') this.advance(G);
-    else if (result === 'fail') this.failMission(G, 'Too slow — the package window closed');
-  }
-
   onEnemyKilled(G) {
     // Ambush progress is read live from G.enemies in update(); nothing to
     // bookkeep here.
@@ -314,10 +354,108 @@ export class Missions {
     p.health = p.maxHealth;
     p.ammo = Math.max(6, p.ammo);
     G.police.clearWanted(G);
+    this.cancelFare(G);
     G.save.save(G);
     document.getElementById('busted-screen').classList.add('hidden');
     document.getElementById('wasted-screen').classList.add('hidden');
     G.mode = 'playing';
     G.hud.showMessage('Back on the street. Stay sharp, Cole.');
+  }
+
+  // ----- Taxi side job (free roam only) -----
+
+  // Called every frame while playing in free roam. When no fare is waiting
+  // and none is riding, a short wait timer runs and then a nearby walker
+  // is marked as the next fare.
+  updateTaxi(G, dt) {
+    const taxi = G.taxi;
+    if (G.missionActive || G.mode !== 'playing') return;
+    if (taxi.phase === 'none') {
+      taxi.waitTimer -= dt;
+      if (taxi.waitTimer > 0) return;
+      this.offerFare(G);
+      return;
+    }
+    if (taxi.phase === 'ride' && taxi.dest) {
+      // Arrival: the car has to be at the destination, not just Cole.
+      if (G.player.car && atSpot(G, taxi.dest.key, 9)) {
+        this.dropFare(G);
+      }
+    }
+  }
+
+  offerFare(G) {
+    const taxi = G.taxi;
+    const near = G.peds.filter(
+      (ped) =>
+        ped.state === 'walk' &&
+        dist2D(ped.pos.x, ped.pos.z, G.player.pos.x, G.player.pos.z) < 70,
+    );
+    if (near.length === 0) {
+      taxi.waitTimer = 5;
+      return;
+    }
+    const client = markTaxiClient(G, pick(near));
+    if (!client) {
+      taxi.waitTimer = 5;
+      return;
+    }
+    taxi.client = client;
+    taxi.phase = 'wait';
+    taxi.fare = 0;
+    taxi.dest = null;
+    G.hud.showMessage('A fare is waiting — look for the yellow marker. Walk up and press T.');
+  }
+
+  // The player pressed T next to the waiting fare. The walker climbs in
+  // (their mesh leaves the street), a destination is picked, and the
+  // beacon points the way.
+  pickupFare(G) {
+    const taxi = G.taxi;
+    if (taxi.phase !== 'wait' || !taxi.client) return false;
+    const client = taxi.client;
+    if (dist2D(client.pos.x, client.pos.z, G.player.pos.x, G.player.pos.z) > 4) return false;
+    const spot = pick(TAXI_SPOTS);
+    taxi.dest = spot;
+    taxi.fare = Math.round(randInt(40, 80) / 5) * 5;
+    taxi.phase = 'ride';
+    G.scene.remove(client.mesh);
+    G.peds = G.peds.filter((ped) => ped !== client);
+    const destPos = G.markers[spot.key];
+    G.beacon.position.copy(destPos);
+    G.beacon.visible = true;
+    G.beaconTarget = destPos;
+    G.hud.setObjective(`Taxi fare: drop your passenger at ${spot.label} — $${taxi.fare}`);
+    G.hud.showMessage(`Fare picked up. Take them to ${spot.label}.`);
+    return true;
+  }
+
+  dropFare(G) {
+    const taxi = G.taxi;
+    G.cash += taxi.fare;
+    G.audio.cash();
+    G.hud.showMessage(`Fare paid: $${taxi.fare}.`);
+    G.beacon.visible = false;
+    G.beaconTarget = null;
+    taxi.phase = 'none';
+    taxi.client = null;
+    taxi.dest = null;
+    taxi.fare = 0;
+    taxi.waitTimer = 8;
+    G.hud.setObjective('Neon Harbor is yours — explore, steal cars, stay out of trouble.');
+  }
+
+  // A fare waiting too long, or a busted/wasted respawn, cancels the job
+  // cleanly so the next offer can come up fresh.
+  cancelFare(G) {
+    const taxi = G.taxi;
+    if (taxi.client) unmarkTaxiClient(G, taxi.client);
+    taxi.phase = 'none';
+    taxi.client = null;
+    taxi.dest = null;
+    taxi.fare = 0;
+    taxi.waitTimer = 10;
+    G.beacon.visible = false;
+    G.beaconTarget = null;
   }
 }

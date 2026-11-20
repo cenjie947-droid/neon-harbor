@@ -1,31 +1,25 @@
-// Neon Harbor — the gta6-01 entry program (Node 22, standard library
-// only). The game is plain static files a desktop browser loads offline:
-// game/index.html and its ES modules, with three.js vendored as a minified
-// build under game/vendor/, no network request at play time. This program
-// gathers that folder plus the screenshots beside it into the output
-// directory the grader reads, and writes the dossier.json summary with the
-// vendored make.fun library. Run it from this directory with
-// `MAKEFUN_OUTPUT_DIR=out node main.ts`; without the variable it writes
+// Neon Harbor — entry program for the gta6-01 competition (Node 22,
+// standard library only). The game itself is a folder of static files a
+// desktop browser loads offline: game/index.html plus its ES modules, with
+// three.js vendored as a minified build under game/vendor/, so nothing is
+// fetched from the network at play time. This program's job is to collect
+// that folder and the screenshots beside it into the directory the grader
+// reads, then write the dossier.json summary using the vendored make.fun
+// library. Run it from this directory as
+// `MAKEFUN_OUTPUT_DIR=out node main.ts`; with no variable set it writes
 // to /output, the path the grader mounts.
 import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
 
-// Where the game lives, and where the grader expects it.
-function resolveDirs() {
-  const here = fileURLToPath(new URL('.', import.meta.url));
-  const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
-  return { here, out };
-}
-
-// The scorer's own caps (from reference/gate.json): only text_max_bytes
-// shapes the bytes; the rest refuse an entry the scorer would refuse —
-// more than 4 screenshots or one over 256 KiB, more than 993 files in
-// game/ or 48 MiB of game files in all, or a path under game/ over 1000
-// bytes (game/ counts beside /output's own 1000-entry cap, its
-// screenshots/ and dossier.json).
-const DOSSIER_LIMITS = {
+// Caps the scorer enforces (from reference/gate.json). Only text_max_bytes
+// changes the bytes; the rest are gates that refuse an entry the scorer
+// would refuse outright: more than 4 screenshots or one over 256 KiB, more
+// than 993 files inside game/, more than 48 MiB of game files in total, or
+// any path under game/ longer than 1000 bytes. game/ is counted beside
+// /output's own 1000-entry cap, its screenshots/ folder and dossier.json.
+const GATE = {
   text_max_bytes: 163840,
   screenshots: { max: 4, max_bytes: 262144 },
   game_max_files: 993,
@@ -33,20 +27,26 @@ const DOSSIER_LIMITS = {
   game_path_max_bytes: 1000,
 };
 
-function gatherGameFiles(here, out) {
-  mkdirSync(out, { recursive: true });
-  cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
-  mkdirSync(join(out, 'screenshots'), { recursive: true });
-  if (existsSync(join(here, 'screenshots'))) {
-    cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
-  }
+function entryPaths() {
+  const root = dirname(fileURLToPath(import.meta.url));
+  const dest = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+  return { root, dest };
 }
 
-function writeDossier(out) {
-  const dossier = buildDossier(out, DOSSIER_LIMITS);
-  writeFileSync(join(out, 'dossier.json'), dossier);
+function copyEntry({ root, dest }) {
+  mkdirSync(dest, { recursive: true });
+  cpSync(join(root, 'game'), join(dest, 'game'), { recursive: true });
+  const shotSrc = join(root, 'screenshots');
+  const shotDest = join(dest, 'screenshots');
+  mkdirSync(shotDest, { recursive: true });
+  if (existsSync(shotSrc)) cpSync(shotSrc, shotDest, { recursive: true });
 }
 
-const { here, out } = resolveDirs();
-gatherGameFiles(here, out);
-writeDossier(out);
+function writeSummary(dest) {
+  const summary = buildDossier(dest, GATE);
+  writeFileSync(join(dest, 'dossier.json'), summary);
+}
+
+const paths = entryPaths();
+copyEntry(paths);
+writeSummary(paths.dest);
