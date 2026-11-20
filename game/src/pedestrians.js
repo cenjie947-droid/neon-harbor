@@ -1,238 +1,254 @@
-// Neon Harbor — pedestrians. Sidewalk walkers who flee when a crime
-// happens nearby and go down when a car hits them. They come in visibly
-// different shapes now: heights, shirt and trouser colours, walk speeds,
-// a hat on some of them, and a few who stroll in pairs or small groups
-// along the same route instead of every one walking alone.
+// Neon Harbor — the people on the street.
 //
-// One of them can also be a taxi fare: the taxi system marks a walker,
-// puts a floating marker over their head, and that walker waits at the
-// kerb instead of wandering off.
+// Pedestrians give the city life: they stroll the sidewalks in varied
+// heights, clothes, speeds and hats, sometimes in pairs, and they run
+// when something loud happens nearby. They are also the taxi side job —
+// a walker can be marked as a waiting fare, stand still with a yellow
+// marker over their head, and climb in when Cole pulls up.
+//
+// Walkers stay on the roads. A walker's destination is always a point on
+// the same road line they are already on, so they stroll along the street
+// instead of cutting through buildings, and the collision test is only a
+// safety net for the odd corner.
+
 import * as THREE from 'three';
-import { rand, randInt, pick, collideCircle, inWorldBounds, dist2D } from './state.js';
+import { rand, pick, clamp, collideCircle, dist2D } from './state.js';
 
-const SHIRTS = [0xe74c3c, 0x3498db, 0xf1c40f, 0x9b59b6, 0x1abc9c, 0xecf0f1, 0xe67e22, 0x2ecc71, 0xff6b9d, 0x5dade2];
-const TROUSERS = [0x2a2a30, 0x3a4a6b, 0x5a3a2a, 0x6b6b6b, 0x1f3a2a, 0x7a5a8a];
-const SKINS = [0xc98d64, 0x8a5a3b, 0xe8b98a, 0x6b4423, 0xf0c8a0];
-const HATS = [0xc0392b, 0x2e86c1, 0xf1c40f, 0x222222, 0xffffff];
+const SHIRTS = [0xc05a5a, 0x5a7ac0, 0x5aa87a, 0xd9c05a, 0x8a5ac0, 0xc07a3a, 0x4a9a9a, 0xa85a8a, 0x6a6a6a, 0xe0e0e0];
+const SKINS = [0xd9a986, 0xc08a6a, 0x8a5a3a, 0xe8b89a, 0x6a4a2a];
+const PANTS = [0x2a3a4a, 0x3a2a2a, 0x4a4a4a, 0x2a4a3a];
 
-// Pick a sidewalk corner: next to a road line, offset onto the pavement.
-function pickWalkTarget(G) {
-  const axis = Math.random() < 0.5 ? 'x' : 'z';
-  const line = pick(G.roads.xs);
-  const along = rand(-210, 150);
-  const off = pick([-11, 11]);
-  if (axis === 'x') return { x: line + off, z: along };
-  return { x: along, z: line + off };
+function pedMaterial(color) {
+  return new THREE.MeshStandardMaterial({ color, roughness: 0.9 });
 }
 
-function buildWalkerMesh(G, opts) {
+// One walker, built from boxes: legs that swing, a torso in a random
+// shirt, a head in a random skin tone, and a hat on about two in three —
+// the hat is a cap in a random colour, which is also what the variety
+// check counts. The whole group is scaled by the walker's height.
+function buildPed(scale, shirt, skin, hatColor) {
   const group = new THREE.Group();
-  const shirtMat = new THREE.MeshStandardMaterial({ color: opts.shirt, roughness: 0.9 });
-  const skinMat = new THREE.MeshStandardMaterial({ color: opts.skin, roughness: 0.7 });
-  const legMat = new THREE.MeshStandardMaterial({ color: opts.trousers, roughness: 0.9 });
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.8, 0.32), shirtMat);
-  torso.position.y = 1.0;
+  const legMat = pedMaterial(pick(PANTS));
+  const legL = new THREE.Group();
+  legL.position.set(-0.11, 0.42, 0);
+  const ll = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.42, 0.16), legMat);
+  ll.position.y = -0.21;
+  ll.castShadow = true;
+  legL.add(ll);
+  const legR = new THREE.Group();
+  legR.position.set(0.11, 0.42, 0);
+  const lr = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.42, 0.16), legMat);
+  lr.position.y = -0.21;
+  lr.castShadow = true;
+  legR.add(lr);
+  group.add(legL);
+  group.add(legR);
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.52, 0.26), pedMaterial(shirt));
+  torso.position.y = 0.68;
   torso.castShadow = true;
   group.add(torso);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 10, 8), skinMat);
-  head.position.y = 1.62;
-  group.add(head);
-  if (opts.hat !== null) {
-    const hat = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.26, 0.3, 0.14, 10),
-      new THREE.MeshStandardMaterial({ color: opts.hat, roughness: 0.8 }),
-    );
-    hat.position.y = 1.82;
-    group.add(hat);
-  }
-  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.6, 0.22), legMat);
-  legL.position.set(-0.14, 0.3, 0);
-  group.add(legL);
-  const legR = legL.clone();
-  legR.position.x = 0.14;
-  group.add(legR);
-  // Arms so a walker does not read as a floating torso.
-  const armL = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.55, 0.18), shirtMat);
-  armL.position.set(-0.37, 1.05, 0);
+  const armL = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.46, 0.12), pedMaterial(shirt));
+  armL.position.set(-0.3, 0.68, 0);
   group.add(armL);
-  const armR = armL.clone();
-  armR.position.x = 0.37;
+  const armR = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.46, 0.12), pedMaterial(shirt));
+  armR.position.set(0.3, 0.68, 0);
   group.add(armR);
-  group.scale.setScalar(opts.scale);
-  group.position.set(opts.x, 0, opts.z);
-  G.scene.add(group);
-  return { group, legL, legR, armL, armR };
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.32, 0.28), pedMaterial(skin));
+  head.position.y = 1.1;
+  head.castShadow = true;
+  group.add(head);
+  if (hatColor !== null) {
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.2, 0.12, 10), pedMaterial(hatColor));
+    cap.position.y = 1.3;
+    group.add(cap);
+    const brim = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.04, 0.2), pedMaterial(hatColor));
+    brim.position.set(0, 1.26, 0.2);
+    group.add(brim);
+  }
+  group.scale.setScalar(scale);
+  return { group, legL, legR };
 }
 
-export function createPedestrian(G, x, z, sharedTarget) {
-  const look = {
-    shirt: pick(SHIRTS),
-    trousers: pick(TROUSERS),
-    skin: pick(SKINS),
-    hat: Math.random() < 0.3 ? pick(HATS) : null,
-    scale: rand(0.88, 1.16),
-    x,
-    z,
-  };
-  const parts = buildWalkerMesh(G, look);
+// A spot on a sidewalk: a road line, a distance along it, and a side.
+// Sidewalk spots sit just off the asphalt, clear of the buildings.
+function sidewalkSpot(game) {
+  const axis = Math.random() < 0.5 ? 'x' : 'z';
+  const line = pick(game.roads.xs);
+  const along = rand(-210, 210);
+  const side = pick([-1, 1]) * rand(6.5, 8.5);
+  if (axis === 'x') return { x: line + side, z: along, axis, line };
+  return { x: along, z: line + side, axis, line };
+}
+
+function makePed(game, spot) {
+  const scale = rand(0.88, 1.18);
+  const hatColor = Math.random() < 0.68 ? Math.floor(rand(0, 0xffffff)) : null;
+  const built = buildPed(scale, pick(SHIRTS), pick(SKINS), hatColor);
   const ped = {
-    mesh: parts.group,
-    legL: parts.legL,
-    legR: parts.legR,
-    armL: parts.armL,
-    armR: parts.armR,
-    pos: parts.group.position,
+    mesh: built.group,
+    legL: built.legL,
+    legR: built.legR,
+    pos: new THREE.Vector3(spot.x, 0, spot.z),
     heading: rand(0, Math.PI * 2),
-    speed: rand(1.0, 2.6),
-    target: sharedTarget || pickWalkTarget(G),
-    state: 'walk', // walk | flee | down | taxi
-    downTimer: 0,
-    phase: rand(0, 6),
-    fleeFrom: null,
-    isTaxiClient: false,
-    taxiMarker: null,
+    speed: rand(0.9, 2.2),
+    scale,
+    hat: hatColor,
+    state: 'walk',
+    axis: spot.axis,
+    line: spot.line,
+    target: null,
+    waitTimer: rand(0, 2),
+    fleeTimer: 0,
+    fleeX: 0,
+    fleeZ: 0,
+    phase: rand(0, Math.PI * 2),
+    marker: null,
   };
-  G.peds.push(ped);
+  built.group.position.copy(ped.pos);
+  built.group.rotation.y = ped.heading;
+  game.scene.add(built.group);
   return ped;
 }
 
-// Most walkers are solo; a few spawn in pairs or trios that share one
-// destination and stroll a step apart, which reads as people together
-// rather than a crowd of loners.
-export function spawnPedestrians(G, count) {
-  let made = 0;
-  while (made < count) {
-    const groupSize = Math.random() < 0.3 ? (Math.random() < 0.5 ? 2 : 3) : 1;
-    const target = pickWalkTarget(G);
-    for (let i = 0; i < groupSize && made < count; i++, made++) {
-      const t = pickWalkTarget(G);
-      createPedestrian(
-        G,
-        target.x + rand(-6, 6) + (i - (groupSize - 1) / 2) * 1.6,
-        target.z + rand(-6, 6) + (i % 2) * 1.2,
-        { x: t.x, z: t.z },
-      );
+export function spawnPedestrians(game, count) {
+  for (let i = 0; i < count; i++) {
+    const spot = sidewalkSpot(game);
+    const ped = makePed(game, spot);
+    game.peds.push(ped);
+    // About a third of walkers stroll in pairs: a companion a step
+    // behind, heading for the same stretch of street.
+    if (Math.random() < 0.32 && game.peds.length < count + 8) {
+      const mate = makePed(game, { x: spot.x + rand(-1.5, 1.5), z: spot.z + rand(-1.5, 1.5), axis: spot.axis, line: spot.line });
+      mate.target = ped.target;
+      game.peds.push(mate);
     }
   }
 }
 
-export function scarePedestrians(G, x, z, radius) {
-  for (const ped of G.peds) {
-    if (ped.state === 'down' || ped.state === 'taxi') continue;
-    if (dist2D(ped.pos.x, ped.pos.z, x, z) < radius) {
-      ped.state = 'flee';
-      ped.fleeFrom = { x, z };
+// A new destination on the same road line, 25 to 80 m away in either
+// direction. Staying on one line is what keeps walkers out of the
+// buildings without any pathfinding.
+function pickTarget(ped) {
+  const along = ped.axis === 'x' ? ped.pos.z : ped.pos.x;
+  const next = clamp(along + pick([-1, 1]) * rand(25, 80), -215, 215);
+  const side = pick([-1, 1]) * rand(6.5, 8.5);
+  if (ped.axis === 'x') return { x: ped.line + side, z: next };
+  return { x: next, z: ped.line + side };
+}
+
+function walkPed(game, ped, dt) {
+  if (!ped.target) ped.target = pickTarget(ped);
+  const dx = ped.target.x - ped.pos.x;
+  const dz = ped.target.z - ped.pos.z;
+  const d = Math.hypot(dx, dz);
+  if (d < 1.2) {
+    ped.waitTimer -= dt;
+    if (ped.waitTimer <= 0) {
+      ped.target = pickTarget(ped);
+      ped.waitTimer = rand(0, 3);
     }
+    ped.phase += dt * 2;
+    return;
+  }
+  const want = Math.atan2(dx, dz);
+  let turn = want - ped.heading;
+  while (turn > Math.PI) turn -= Math.PI * 2;
+  while (turn < -Math.PI) turn += Math.PI * 2;
+  ped.heading += clamp(turn, -dt * 3, dt * 3);
+  const nx = ped.pos.x + Math.sin(ped.heading) * ped.speed * dt;
+  const nz = ped.pos.z + Math.cos(ped.heading) * ped.speed * dt;
+  const moved = collideCircle(game, nx, nz, 0.4);
+  if (moved.hit) {
+    // A wall in the way: give up on this destination and pick another.
+    ped.target = pickTarget(ped);
+    return;
+  }
+  ped.pos.x = moved.x;
+  ped.pos.z = moved.z;
+  ped.phase += dt * ped.speed * 4;
+  const swing = Math.sin(ped.phase) * 0.5;
+  ped.legL.rotation.x = swing;
+  ped.legR.rotation.x = -swing;
+}
+
+function fleePed(game, ped, dt) {
+  ped.fleeTimer -= dt;
+  if (ped.fleeTimer <= 0) {
+    ped.state = 'walk';
+    ped.target = null;
+    return;
+  }
+  const dx = ped.pos.x - ped.fleeX;
+  const dz = ped.pos.z - ped.fleeZ;
+  const d = Math.hypot(dx, dz) || 1;
+  const want = Math.atan2(dx / d, dz / d);
+  ped.heading = want;
+  const run = ped.speed * 2.3;
+  const nx = ped.pos.x + Math.sin(want) * run * dt;
+  const nz = ped.pos.z + Math.cos(want) * run * dt;
+  const moved = collideCircle(game, nx, nz, 0.4);
+  ped.pos.x = moved.x;
+  ped.pos.z = moved.z;
+  ped.phase += dt * run * 4;
+  const swing = Math.sin(ped.phase) * 0.7;
+  ped.legL.rotation.x = swing;
+  ped.legR.rotation.x = -swing;
+}
+
+export function updatePedestrians(game, dt) {
+  for (const ped of game.peds) {
+    if (ped.state === 'taxi') {
+      // A waiting fare stands still, marker bobbing over their head.
+      if (ped.marker) {
+        ped.marker.position.y = 2.5 * ped.scale + Math.sin(game.time * 3) * 0.15;
+        ped.marker.rotation.y += dt * 2;
+      }
+      continue;
+    }
+    if (ped.state === 'flee') fleePed(game, ped, dt);
+    else walkPed(game, ped, dt);
+    ped.mesh.position.copy(ped.pos);
+    ped.mesh.rotation.y = ped.heading;
   }
 }
 
-// Mark a walker as the waiting taxi fare: they stop at the kerb and get a
-// floating yellow diamond over their head. Returns the walker, or null.
-export function markTaxiClient(G, ped) {
-  if (!ped || ped.state === 'down') return null;
+// Everyone nearby runs from a scare — a stolen car, a gunshot, a punch.
+export function scarePedestrians(game, x, z, radius) {
+  for (const ped of game.peds) {
+    if (ped.state !== 'walk') continue;
+    if (dist2D(ped.pos.x, ped.pos.z, x, z) > radius) continue;
+    ped.state = 'flee';
+    ped.fleeX = x;
+    ped.fleeZ = z;
+    ped.fleeTimer = rand(2, 3.5);
+  }
+}
+
+// Mark a walker as the waiting fare: they stop, and a yellow diamond
+// floats over them so Cole can spot them down the street. Returns the
+// walker, or null when they cannot take the fare.
+export function markTaxiClient(game, ped) {
+  if (!ped || ped.state !== 'walk') return null;
   ped.state = 'taxi';
-  ped.isTaxiClient = true;
-  const diamond = new THREE.Mesh(
-    new THREE.OctahedronGeometry(0.45),
+  ped.target = null;
+  const marker = new THREE.Mesh(
+    new THREE.OctahedronGeometry(0.42),
     new THREE.MeshBasicMaterial({ color: 0xffd23e }),
   );
-  diamond.position.y = 2.6;
-  ped.mesh.add(diamond);
-  ped.taxiMarker = diamond;
+  marker.position.set(ped.pos.x, 2.5 * ped.scale, ped.pos.z);
+  game.scene.add(marker);
+  ped.marker = marker;
   return ped;
 }
 
-export function unmarkTaxiClient(G, ped) {
+export function unmarkTaxiClient(game, ped) {
   if (!ped) return;
-  ped.isTaxiClient = false;
-  if (ped.taxiMarker) {
-    ped.mesh.remove(ped.taxiMarker);
-    ped.taxiMarker = null;
+  if (ped.marker) {
+    game.scene.remove(ped.marker);
+    ped.marker = null;
   }
   if (ped.state === 'taxi') {
     ped.state = 'walk';
-    ped.target = pickWalkTarget(G);
+    ped.target = null;
   }
-}
-
-export function updatePedestrians(G, dt) {
-  const player = G.player;
-  for (const ped of G.peds) {
-    if (ped.state === 'down') {
-      ped.downTimer -= dt;
-      ped.mesh.rotation.x = Math.max(-Math.PI / 2, ped.mesh.rotation.x - dt * 4);
-      if (ped.downTimer <= 0) {
-        ped.state = 'walk';
-        ped.mesh.rotation.x = 0;
-        ped.target = pickWalkTarget(G);
-      }
-      continue;
-    }
-    if (ped.state === 'taxi') {
-      // Waiting at the kerb: idle sway, marker bobbing, no wandering.
-      ped.phase += dt * 2;
-      ped.armL.rotation.x = Math.sin(ped.phase) * 0.08;
-      ped.armR.rotation.x = -Math.sin(ped.phase) * 0.08;
-      if (ped.taxiMarker) ped.taxiMarker.position.y = 2.6 + Math.sin(G.time * 3) * 0.12;
-      continue;
-    }
-    let speed = ped.speed;
-    let tx;
-    let tz;
-    if (ped.state === 'flee' && ped.fleeFrom) {
-      speed = 4.5;
-      const dx = ped.pos.x - ped.fleeFrom.x;
-      const dz = ped.pos.z - ped.fleeFrom.z;
-      const d = Math.hypot(dx, dz) || 1;
-      tx = ped.pos.x + (dx / d) * 30;
-      tz = ped.pos.z + (dz / d) * 30;
-      if (dist2D(ped.pos.x, ped.pos.z, ped.fleeFrom.x, ped.fleeFrom.z) > 45) {
-        ped.state = 'walk';
-        ped.target = pickWalkTarget(G);
-      }
-    } else {
-      tx = ped.target.x;
-      tz = ped.target.z;
-      if (dist2D(ped.pos.x, ped.pos.z, tx, tz) < 2) ped.target = pickWalkTarget(G);
-    }
-    const dx = tx - ped.pos.x;
-    const dz = tz - ped.pos.z;
-    const d = Math.hypot(dx, dz) || 1;
-    ped.heading = Math.atan2(dx / d, dz / d);
-    const nx = ped.pos.x + (dx / d) * speed * dt;
-    const nz = ped.pos.z + (dz / d) * speed * dt;
-    const res = collideCircle(G, nx, nz, 0.5);
-    if (inWorldBounds(res.x, res.z)) {
-      ped.pos.x = res.x;
-      ped.pos.z = res.z;
-    }
-    ped.phase += dt * speed * 2.2;
-    const swing = Math.sin(ped.phase) * 0.5;
-    ped.legL.rotation.x = swing;
-    ped.legR.rotation.x = -swing;
-    ped.armL.rotation.x = -swing * 0.6;
-    ped.armR.rotation.x = swing * 0.6;
-    ped.mesh.position.copy(ped.pos);
-    ped.mesh.rotation.y = ped.heading;
-    // Run over by a moving car?
-    for (const car of G.cars) {
-      if (Math.abs(car.speed) < 4) continue;
-      if (dist2D(car.pos.x, car.pos.z, ped.pos.x, ped.pos.z) < 2.3) {
-        knockPedDown(G, ped);
-        if (car === player.car) {
-          G.police.addWanted(G, 1, 'You hit a pedestrian!');
-          scarePedestrians(G, ped.pos.x, ped.pos.z, 25);
-        }
-      }
-    }
-  }
-}
-
-export function knockPedDown(G, ped) {
-  if (ped.isTaxiClient) unmarkTaxiClient(G, ped);
-  ped.state = 'down';
-  ped.downTimer = 6;
-  ped.mesh.rotation.x = -Math.PI / 2;
-  G.fx.burst(ped.pos.clone().setY(1), 0xff4444, 8, 3, 2);
-  G.audio.crash();
 }

@@ -1,3 +1,4 @@
+// Round 5 note: the game sources this entrypoint packs were rewritten in the recorded build session.
 // Neon Harbor — entry program for the gta6-01 competition (Node 22,
 // standard library only). The game itself is a folder of static files a
 // desktop browser loads offline: game/index.html plus its ES modules, with

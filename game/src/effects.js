@@ -1,109 +1,132 @@
-// Neon Harbor — particles, tracers, muzzle flashes and screen shake.
-// Particles share one small box geometry and one material per burst; the
-// per-frame update ages them, lets them bounce once off the ground, and
-// pulls them out of the scene when their life runs out.
+// Neon Harbor — sparks, smoke, muzzle flashes and camera shake.
+//
+// Everything here is a short-lived mesh: a burst throws a handful of
+// coloured chips out from a point, a smoke puff rises and swells, a
+// tracer is a bright bar that lives for a blink, and an explosion is a
+// burst plus smoke plus a shake. Particles carry their own velocity and
+// lifetime and are cleaned up when they die, so the scene never fills
+// with dead meshes. The list of live particles is public on purpose —
+// the tests count smoke through it.
+
 import * as THREE from 'three';
 
+const CHIP = new THREE.BoxGeometry(0.16, 0.16, 0.16);
+const PUFF = new THREE.SphereGeometry(0.5, 8, 6);
+
 export class Effects {
-  constructor(G) {
-    this.G = G;
-    this.particles = []; // {mesh, vel, life, maxLife}
-    this.tracers = []; // {line, life}
-    this.arcs = []; // punch swing arcs, handled by combat through addArc
-    this.particleGeo = new THREE.BoxGeometry(0.14, 0.14, 0.14);
-    this.flashLight = new THREE.PointLight(0xffc860, 0, 14, 2);
-    G.scene.add(this.flashLight);
+  constructor(game) {
+    this.game = game;
+    this.particles = [];
+    this.trauma = 0;
   }
 
-  burst(pos, color, count, speed, up = 2.5) {
-    const G = this.G;
-    const mat = new THREE.MeshBasicMaterial({ color, transparent: true });
+  // Add one particle to the scene and the live list. `rise` makes it
+  // float up instead of falling, `grow` swells it as it ages.
+  add(mesh, vel, life, opts = {}) {
+    mesh.position.copy(opts.at || new THREE.Vector3());
+    this.game.scene.add(mesh);
+    this.particles.push({
+      mesh,
+      vel: vel.clone(),
+      life,
+      maxLife: life,
+      gravity: opts.rise ? 1.5 : -9,
+      grow: opts.grow || 0,
+      baseScale: opts.baseScale || 1,
+      fade: opts.fade !== false,
+    });
+    return mesh;
+  }
+
+  // A spray of coloured chips: crash debris, hit sparks, punch stars.
+  // `speed` is the launch speed, `size` scales the chips.
+  burst(at, color, count, speed = 3, size = 1) {
     for (let i = 0; i < count; i++) {
-      const mesh = new THREE.Mesh(this.particleGeo, mat);
-      mesh.position.copy(pos);
-      const azimuth = Math.random() * Math.PI * 2;
-      const elevation = Math.random() * Math.PI - Math.PI / 2;
-      const strength = speed * (0.4 + Math.random() * 0.8);
-      const vel = new THREE.Vector3(
-        Math.cos(azimuth) * Math.cos(elevation) * strength,
-        Math.abs(Math.sin(elevation)) * strength + up,
-        Math.sin(azimuth) * Math.cos(elevation) * strength,
-      );
-      G.scene.add(mesh);
-      this.particles.push({ mesh, vel, life: 0.7 + Math.random() * 0.4, maxLife: 1.1 });
+      const material = new THREE.MeshBasicMaterial({ color, transparent: true });
+      const mesh = new THREE.Mesh(CHIP, material);
+      mesh.scale.setScalar(size * (0.7 + Math.random() * 0.6));
+      const a = Math.random() * Math.PI * 2;
+      const up = Math.random() * 0.7 + 0.3;
+      const vel = new THREE.Vector3(Math.cos(a) * speed, up * speed, Math.sin(a) * speed);
+      this.add(mesh, vel, 0.45 + Math.random() * 0.4, { at, baseScale: mesh.scale.x });
     }
   }
 
-  // A burst that keeps feeding itself for a while — used for the smoke
-  // trailing a badly damaged car. Call once per frame while smoking.
-  smokePuff(pos) {
-    this.burst(pos, 0x777777, 2, 1.2, 2.2);
+  // A grey puff from a damaged hood: rises, swells, hangs for a while.
+  smokePuff(at) {
+    const material = new THREE.MeshBasicMaterial({ color: 0x777777, transparent: true, opacity: 0.55 });
+    const mesh = new THREE.Mesh(PUFF, material);
+    mesh.scale.setScalar(0.6);
+    const vel = new THREE.Vector3((Math.random() - 0.5) * 0.4, 1.1 + Math.random() * 0.5, (Math.random() - 0.5) * 0.4);
+    this.add(mesh, vel, 1.4, { at, rise: true, grow: 1.6, baseScale: 0.6 });
   }
 
-  explosion(pos) {
-    this.burst(pos, 0xff7a1e, 26, 9, 4);
-    this.burst(pos, 0xffd23e, 16, 6, 5);
-    this.burst(pos, 0x444444, 12, 3, 6);
-    this.G.shake = Math.max(this.G.shake, 0.7);
-    this.G.audio.crash();
+  // A big one: orange fire, grey smoke, and a shake.
+  explosion(at) {
+    this.burst(at, 0xff7722, 18, 7, 1.4);
+    this.burst(at, 0xffcc66, 10, 4, 1);
+    for (let i = 0; i < 4; i++) {
+      const p = at.clone();
+      p.x += (Math.random() - 0.5) * 1.5;
+      p.z += (Math.random() - 0.5) * 1.5;
+      this.smokePuff(p);
+    }
+    this.shake(0.55);
   }
 
+  // The flash at a gun's muzzle: a bright chip and a couple of sparks.
+  muzzle(origin, dir) {
+    const at = origin.clone().addScaledVector(dir, 0.8);
+    at.y = Math.max(0.4, at.y);
+    this.burst(at, 0xffdd66, 4, 3, 0.8);
+  }
+
+  // A bright bar from a gun to where the shot landed, gone in a blink.
   tracer(from, to) {
-    const G = this.G;
-    const geo = new THREE.BufferGeometry().setFromPoints([from, to]);
-    const line = new THREE.Line(
-      geo,
-      new THREE.LineBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0.95 }),
-    );
-    G.scene.add(line);
-    this.tracers.push({ line, life: 0.09 });
+    const len = from.distanceTo(to);
+    if (len < 0.5) return;
+    const material = new THREE.MeshBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0.9 });
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, len), material);
+    mesh.position.copy(from).lerp(to, 0.5);
+    mesh.lookAt(to);
+    this.add(mesh, new THREE.Vector3(), 0.09, { at: mesh.position, fade: true });
   }
 
-  muzzle(pos, dir) {
-    const G = this.G;
-    this.flashLight.position.copy(pos).addScaledVector(dir, 0.4);
-    this.flashLight.intensity = 26;
-    this.burst(pos.clone().addScaledVector(dir, 0.5), 0xffc860, 5, 3, 1);
-  }
-
+  // Add a jolt. The trauma stacks up to 1 and bleeds off over a second.
   shake(amount) {
-    this.G.shake = Math.max(this.G.shake, amount);
+    this.trauma = Math.min(1, this.trauma + amount);
   }
 
   update(dt) {
-    const G = this.G;
+    // Camera shake: a random offset that scales with the square of the
+    // trauma, so small bumps barely register and big hits lurch.
+    if (this.trauma > 0) {
+      this.trauma = Math.max(0, this.trauma - dt * 1.4);
+      const s = this.trauma * this.trauma * 0.55;
+      const cam = this.game.camera;
+      if (cam) {
+        cam.position.x += (Math.random() - 0.5) * s;
+        cam.position.y += (Math.random() - 0.5) * s * 0.6;
+      }
+    }
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const p = this.particles[i];
       p.life -= dt;
       if (p.life <= 0) {
-        G.scene.remove(p.mesh);
+        this.game.scene.remove(p.mesh);
+        if (p.mesh.material) p.mesh.material.dispose();
         this.particles.splice(i, 1);
         continue;
       }
-      p.vel.y -= 12 * dt;
+      p.vel.y += p.gravity * dt;
       p.mesh.position.addScaledVector(p.vel, dt);
       if (p.mesh.position.y < 0.05) {
         p.mesh.position.y = 0.05;
-        p.vel.y *= -0.3;
-        p.vel.x *= 0.7;
-        p.vel.z *= 0.7;
+        p.vel.y = Math.abs(p.vel.y) * 0.3;
       }
-      p.mesh.material.opacity = Math.min(1, p.life / 0.4);
+      const age = 1 - p.life / p.maxLife;
+      if (p.grow) p.mesh.scale.setScalar(p.baseScale * (1 + age * p.grow));
+      if (p.fade) p.mesh.material.opacity = Math.max(0, p.life / p.maxLife);
     }
-    for (let i = this.tracers.length - 1; i >= 0; i--) {
-      const t = this.tracers[i];
-      t.life -= dt;
-      if (t.life <= 0) {
-        G.scene.remove(t.line);
-        t.line.geometry.dispose();
-        this.tracers.splice(i, 1);
-        continue;
-      }
-      t.line.material.opacity = t.life / 0.09;
-    }
-    if (this.flashLight.intensity > 0) {
-      this.flashLight.intensity = Math.max(0, this.flashLight.intensity - dt * 260);
-    }
-    G.shake = Math.max(0, G.shake - dt * 2.2);
   }
 }
