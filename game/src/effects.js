@@ -2,11 +2,11 @@
 //
 // Everything here is a short-lived mesh: a burst throws a handful of
 // coloured chips out from a point, a smoke puff rises and swells, a
-// tracer is a bright bar that lives for a blink, and an explosion is a
-// burst plus smoke plus a shake. Particles carry their own velocity and
-// lifetime and are cleaned up when they die, so the scene never fills
-// with dead meshes. The list of live particles is public on purpose —
-// the tests count smoke through it.
+// tracer is a bright bar that lives for a blink, and an explosion is
+// a burst plus smoke plus a shake. Particles carry their own velocity
+// and lifetime and are cleaned up when they die, so the scene never
+// fills with dead meshes. The list of live particles is public on
+// purpose — the tests count smoke through it.
 
 import * as THREE from 'three';
 
@@ -22,33 +22,43 @@ export class Effects {
 
   // Add one particle to the scene and the live list. `rise` makes it
   // float up instead of falling, `grow` swells it as it ages.
-  add(mesh, vel, life, opts = {}) {
-    mesh.position.copy(opts.at || new THREE.Vector3());
+  add(mesh, vel, life, opts) {
+    const o = opts || {};
+    mesh.position.copy(o.at || new THREE.Vector3());
     this.game.scene.add(mesh);
-    this.particles.push({
-      mesh,
-      vel: vel.clone(),
-      life,
-      maxLife: life,
-      gravity: opts.rise ? 1.5 : -9,
-      grow: opts.grow || 0,
-      baseScale: opts.baseScale || 1,
-      fade: opts.fade !== false,
-    });
+    const p = {};
+    p.mesh = mesh;
+    p.vel = vel.clone();
+    p.life = life;
+    p.maxLife = life;
+    p.gravity = o.rise ? 1.5 : -9;
+    p.grow = o.grow || 0;
+    p.baseScale = o.baseScale || 1;
+    p.fade = o.fade !== false;
+    this.particles.push(p);
     return mesh;
   }
 
   // A spray of coloured chips: crash debris, hit sparks, punch stars.
   // `speed` is the launch speed, `size` scales the chips.
-  burst(at, color, count, speed = 3, size = 1) {
-    for (let i = 0; i < count; i++) {
+  burst(at, color, count, speed, size) {
+    const launch = speed === undefined ? 3 : speed;
+    const scale = size === undefined ? 1 : size;
+    let i = 0;
+    while (i < count) {
       const material = new THREE.MeshBasicMaterial({ color, transparent: true });
       const mesh = new THREE.Mesh(CHIP, material);
-      mesh.scale.setScalar(size * (0.7 + Math.random() * 0.6));
+      const s = scale * (0.7 + Math.random() * 0.6);
+      mesh.scale.setScalar(s);
       const a = Math.random() * Math.PI * 2;
       const up = Math.random() * 0.7 + 0.3;
-      const vel = new THREE.Vector3(Math.cos(a) * speed, up * speed, Math.sin(a) * speed);
-      this.add(mesh, vel, 0.45 + Math.random() * 0.4, { at, baseScale: mesh.scale.x });
+      const vel = new THREE.Vector3(0, 0, 0);
+      vel.x = Math.cos(a) * launch;
+      vel.y = up * launch;
+      vel.z = Math.sin(a) * launch;
+      const life = 0.45 + Math.random() * 0.4;
+      this.add(mesh, vel, life, { at, baseScale: mesh.scale.x });
+      i++;
     }
   }
 
@@ -57,7 +67,10 @@ export class Effects {
     const material = new THREE.MeshBasicMaterial({ color: 0x777777, transparent: true, opacity: 0.55 });
     const mesh = new THREE.Mesh(PUFF, material);
     mesh.scale.setScalar(0.6);
-    const vel = new THREE.Vector3((Math.random() - 0.5) * 0.4, 1.1 + Math.random() * 0.5, (Math.random() - 0.5) * 0.4);
+    const vel = new THREE.Vector3(0, 0, 0);
+    vel.x = (Math.random() - 0.5) * 0.4;
+    vel.y = 1.1 + Math.random() * 0.5;
+    vel.z = (Math.random() - 0.5) * 0.4;
     this.add(mesh, vel, 1.4, { at, rise: true, grow: 1.6, baseScale: 0.6 });
   }
 
@@ -65,11 +78,13 @@ export class Effects {
   explosion(at) {
     this.burst(at, 0xff7722, 18, 7, 1.4);
     this.burst(at, 0xffcc66, 10, 4, 1);
-    for (let i = 0; i < 4; i++) {
+    let i = 0;
+    while (i < 4) {
       const p = at.clone();
       p.x += (Math.random() - 0.5) * 1.5;
       p.z += (Math.random() - 0.5) * 1.5;
       this.smokePuff(p);
+      i++;
     }
     this.shake(0.55);
   }
@@ -77,7 +92,7 @@ export class Effects {
   // The flash at a gun's muzzle: a bright chip and a couple of sparks.
   muzzle(origin, dir) {
     const at = origin.clone().addScaledVector(dir, 0.8);
-    at.y = Math.max(0.4, at.y);
+    if (at.y < 0.4) at.y = 0.4;
     this.burst(at, 0xffdd66, 4, 3, 0.8);
   }
 
@@ -109,13 +124,15 @@ export class Effects {
         cam.position.y += (Math.random() - 0.5) * s * 0.6;
       }
     }
-    for (let i = this.particles.length - 1; i >= 0; i--) {
+    let i = this.particles.length - 1;
+    while (i >= 0) {
       const p = this.particles[i];
       p.life -= dt;
       if (p.life <= 0) {
         this.game.scene.remove(p.mesh);
         if (p.mesh.material) p.mesh.material.dispose();
         this.particles.splice(i, 1);
+        i--;
         continue;
       }
       p.vel.y += p.gravity * dt;
@@ -127,6 +144,7 @@ export class Effects {
       const age = 1 - p.life / p.maxLife;
       if (p.grow) p.mesh.scale.setScalar(p.baseScale * (1 + age * p.grow));
       if (p.fade) p.mesh.material.opacity = Math.max(0, p.life / p.maxLife);
+      i--;
     }
   }
 }
