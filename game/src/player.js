@@ -60,10 +60,20 @@ function buildColeMesh() {
   const colors = { skin: 0xd9a986, jacket: 0x2a5a6a, jeans: 0x2a3a4a, hair: 0x2a2018 };
   const legL = makeLimb(group, -0.14, 0.52, 0.22, 0.52, 0.22, colors.jeans);
   const legR = makeLimb(group, 0.14, 0.52, 0.22, 0.52, 0.22, colors.jeans);
-  boxPart(group, 0.56, 0.62, 0.32, colors.jacket, 0.85, 0, 0.85, 0);
-  boxPart(group, 0.34, 0.36, 0.32, colors.skin, 0.7, 0, 1.36, 0);
-  const hairTop = boxPart(group, 0.36, 0.12, 0.34, colors.hair, 0.95, 0, 1.58, -0.02);
-  hairTop.castShadow = false;
+  // Torso, head and hair as [w, h, d, color, rough, x, y, z] rows.
+  const boxes = [
+    [0.56, 0.62, 0.32, colors.jacket, 0.85, 0, 0.85, 0],
+    [0.34, 0.36, 0.32, colors.skin, 0.7, 0, 1.36, 0],
+    [0.36, 0.12, 0.34, colors.hair, 0.95, 0, 1.58, -0.02],
+  ];
+  const parts = [];
+  let i = 0;
+  while (i < boxes.length) {
+    const b = boxes[i];
+    parts.push(boxPart(group, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]));
+    i++;
+  }
+  parts[2].castShadow = false;
   const armL = makeLimb(group, -0.37, 1.12, 0.16, 0.55, 0.16, colors.jacket);
   const armR = makeLimb(group, 0.37, 1.12, 0.16, 0.55, 0.16, colors.jacket);
   return { group, legL, legR, armL, armR };
@@ -100,6 +110,18 @@ export function createPlayer(game) {
   return cole;
 }
 
+// Where the camera wants to be: behind the target at the given yaw
+// and distance, lifted by the pitch.
+function cameraSpot(target, yaw, dist, lift, pitch) {
+  const cp = Math.cos(pitch);
+  const sp = Math.sin(pitch);
+  const spot = new THREE.Vector3(0, 0, 0);
+  spot.x = target.x - Math.sin(yaw) * cp * dist;
+  spot.y = target.y + sp * dist + lift;
+  spot.z = target.z - Math.cos(yaw) * cp * dist;
+  return spot;
+}
+
 // Put the camera where it belongs this frame: behind Cole on foot,
 // behind the car while driving. It eases in, and snaps when it is a
 // long way off (a teleport or a Continue), so the view never sweeps
@@ -116,55 +138,54 @@ function moveCamera(game, dt) {
     dist = 10;
     lift = 1;
   }
-  const cp = Math.cos(cole.camPitch);
-  const sp = Math.sin(cole.camPitch);
-  const want = new THREE.Vector3(0, 0, 0);
-  want.x = target.x - Math.sin(yaw) * cp * dist;
-  want.y = target.y + sp * dist + lift;
-  want.z = target.z - Math.cos(yaw) * cp * dist;
+  const want = cameraSpot(target, yaw, dist, lift, cole.camPitch);
   // On foot the rig sits about head height above the street; the
   // numbers above already put it there, but clamp the floor so it
   // never dips under the pavement.
   if (want.y < 1.5) want.y = 1.5;
   const gap = cam.position.distanceTo(want);
-  if (gap > 25) {
-    cam.position.copy(want);
-  } else {
-    const k = Math.min(1, dt * 9);
-    cam.position.lerp(want, k);
-  }
+  const k = gap > 25 ? 1 : Math.min(1, dt * 9);
+  cam.position.lerp(want, k);
   cam.lookAt(target);
 }
 
 function tickTimers(cole, dt) {
   const timers = ['punchCooldown', 'shootCooldown', 'invuln', 'punchAnim'];
-  for (let i = 0; i < timers.length; i++) {
-    const key = timers[i];
-    if (cole[key] > 0) cole[key] -= dt;
+  for (const key of timers) {
+    if (cole[key] > 0) cole[key] = cole[key] - dt;
   }
 }
 
 // Camera-relative movement: W runs away from the camera, S toward it,
 // A/D strafe. The camera yaw is the reference, not Cole's heading, so
-// turning the camera turns the controls with it.
+// turning the camera turns the controls with it. Each held key adds
+// its direction to the move vector.
 function stepOnFoot(game, cole, dt) {
   const keys = game.input.keys;
   const fwdX = Math.sin(cole.camYaw);
   const fwdZ = Math.cos(cole.camYaw);
   const rightX = Math.cos(cole.camYaw);
   const rightZ = -Math.sin(cole.camYaw);
+  const moves = [
+    ['KeyW', fwdX, fwdZ],
+    ['KeyS', -fwdX, -fwdZ],
+    ['KeyD', rightX, rightZ],
+    ['KeyA', -rightX, -rightZ],
+  ];
   let mx = 0;
   let mz = 0;
-  if (keys.has('KeyW')) { mx += fwdX; mz += fwdZ; }
-  if (keys.has('KeyS')) { mx -= fwdX; mz -= fwdZ; }
-  if (keys.has('KeyD')) { mx += rightX; mz += rightZ; }
-  if (keys.has('KeyA')) { mx -= rightX; mz -= rightZ; }
+  for (const [code, dx, dz] of moves) {
+    if (keys.has(code)) {
+      mx = mx + dx;
+      mz = mz + dz;
+    }
+  }
   const moving = mx !== 0 || mz !== 0;
   let pace = 0;
   if (moving) {
     const len = Math.hypot(mx, mz);
-    mx /= len;
-    mz /= len;
+    mx = mx / len;
+    mz = mz / len;
     const sprint = keys.has('ShiftLeft') || keys.has('ShiftRight');
     pace = TUNE.walkSpeed * (sprint ? TUNE.sprintMult : 1);
     const nx = cole.pos.x + mx * pace * dt;
@@ -181,8 +202,8 @@ function stepOnFoot(game, cole, dt) {
     cole.grounded = false;
   }
   if (!cole.grounded) {
-    cole.vy -= TUNE.gravity * dt;
-    cole.pos.y += cole.vy * dt;
+    cole.vy = cole.vy - TUNE.gravity * dt;
+    cole.pos.y = cole.pos.y + cole.vy * dt;
     if (cole.pos.y <= 0) {
       cole.pos.y = 0;
       cole.vy = 0;
@@ -205,7 +226,7 @@ function animateCole(game, cole, moving) {
   if (cole.punchAnim > 0) {
     // A punch lasts 0.22 s (the combat module's window): the arm swings
     // out and back in that time.
-    const p = 1 - cole.punchAnim / 0.22;
+    const p = (0.22 - cole.punchAnim) / 0.22;
     cole.armR.rotation.x = -Math.sin(p * Math.PI) * 1.5;
   } else {
     cole.armR.rotation.x = swing * 0.7;
@@ -219,8 +240,9 @@ export function updatePlayer(game, dt) {
   tickTimers(cole, dt);
   // The mouse orbits the camera. Consume the deltas here so they apply
   // exactly once per frame.
-  cole.camYaw -= game.input.mouseDX * 0.0035;
-  cole.camPitch = clamp(cole.camPitch + game.input.mouseDY * 0.0022, 0.06, 1.05);
+  cole.camYaw = cole.camYaw - game.input.mouseDX * 0.0035;
+  const nextPitch = cole.camPitch + game.input.mouseDY * 0.0022;
+  cole.camPitch = clamp(nextPitch, 0.06, 1.05);
   game.input.mouseDX = 0;
   game.input.mouseDY = 0;
   if (cole.car) {
@@ -245,10 +267,9 @@ export function updatePlayer(game, dt) {
 // the wasted flow takes over.
 export function damagePlayer(game, amount, cause) {
   const cole = game.player;
-  if (!cole) return;
-  if (game.mode !== 'playing') return;
-  if (cole.health <= 0) return;
-  if (cause !== 'test' && cole.invuln > 0) return;
+  const open = cole && game.mode === 'playing' && cole.health > 0;
+  const grace = cause !== 'test' && cole && cole.invuln > 0;
+  if (!open || grace) return;
   cole.health = Math.max(0, cole.health - amount);
   cole.invuln = 0.5;
   if (game.hud) game.hud.flashDamage();
