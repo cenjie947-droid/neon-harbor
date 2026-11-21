@@ -1,183 +1,184 @@
-// Neon Harbor — saving and continuing.
+// Neon Harbor — localStorage save / continue.
 //
-// The save is one JSON blob in localStorage: the wallet, the job and
-// the beat inside it, Cole's spot and condition, and the car he was
-// driving (model, colour, spot, heading, health). Continuing puts all
-// of that back — including rebuilding the car in a fresh world, since
-// a reload deals a new set of parked cars. If the saved car genuinely
-// cannot be placed (its spot and every spot near it are blocked), the
-// job restarts from its first beat and the note says why; anything else
-// restores exactly where Cole left off.
-
-import { collideCircle } from './state.js';
-import { createCar } from './vehicles.js';
+// One record holds everything a reload needs to put Cole back exactly
+// where he was: which mission and which beat inside it, cash, health,
+// where he stood — and, crucially, the car he was driving (model,
+// colour, spot, heading, health), because a stolen car is progress.
+// main.js drives the flow: load() -> apply() -> restoreCar() ->
+// restorePlayer(), re-asserting mission/step from the record itself.
+import { clamp, collideCircle } from './state.js';
+import { createCar, enterCar } from './vehicles.js';
 
 const SAVE_KEY = 'neon-harbor-save-v1';
-
-// Rings of fallback spots around a saved position, tried in order
-// when the exact spot is blocked. A car is about four metres long,
-// so the rings step out in fives.
-function ringOffsets() {
-  const rings = [];
-  const steps = [3, 6, 9];
-  for (let s = 0; s < steps.length; s++) {
-    const d = steps[s];
-    rings.push([d, 0]);
-    rings.push([d, d]);
-    rings.push([0, d]);
-    rings.push([-d, d]);
-    rings.push([-d, 0]);
-    rings.push([-d, -d]);
-    rings.push([0, -d]);
-    rings.push([d, -d]);
-  }
-  return rings;
-}
-
-const FALLBACK_RINGS = ringOffsets();
+const SAVE_VERSION = 1;
 
 export class SaveData {
+  constructor() {
+    this.key = SAVE_KEY;
+  }
+
+  // -- packing ------------------------------------------------------------
+
   packPlayer(cole) {
     if (!cole) return null;
-    const p = {};
-    p.x = cole.pos.x;
-    p.z = cole.pos.z;
-    p.heading = cole.heading;
-    p.health = cole.health;
-    p.ammo = cole.ammo;
-    p.weapon = cole.weapon;
-    return p;
+    return {
+      x: cole.pos ? cole.pos.x : 0,
+      z: cole.pos ? cole.pos.z : 0,
+      heading: cole.heading || 0,
+      health: Math.max(1, Math.round(cole.health || 100)),
+      weapon: cole.weapon || 'fists',
+      ammo: cole.ammo || 0,
+    };
   }
 
   packCar(ride) {
     if (!ride) return null;
-    const c = {};
-    c.name = ride.name;
-    c.color = ride.color;
-    c.x = ride.pos.x;
-    c.z = ride.pos.z;
-    c.heading = ride.heading;
-    c.health = ride.health;
-    c.special = ride.special || null;
-    c.isVan = !!ride.isVan;
-    return c;
+    return {
+      name: ride.name || '',
+      model: ride.model || 'sedan',
+      color: ride.color ?? null,
+      x: ride.pos ? ride.pos.x : 0,
+      z: ride.pos ? ride.pos.z : 0,
+      heading: ride.heading || 0,
+      hp: Math.max(0, Math.round(ride.health ?? 100)),
+      isVan: !!ride.isVan,
+      special: ride.special ?? null,
+    };
   }
+
+  // -- writing ------------------------------------------------------------
 
   save(game) {
+    const record = {
+      version: SAVE_VERSION,
+      savedAt: Date.now(),
+      missionIndex: game.missionIndex || 0,
+      missionStep: game.missionStep || 0,
+      missionActive: !!game.missionActive,
+      missionTimer: game.missionTimer || 0,
+      cash: Math.max(0, Math.round(game.cash || 0)),
+      wanted: 0, // a fresh load starts clean; heat does not survive a reload
+      player: this.packPlayer(game.player),
+      car: this.packCar(game.player ? game.player.car : null),
+    };
     try {
-      const cole = game.player;
-      const ride = cole ? cole.car : null;
-      const data = {};
-      data.v = 1;
-      data.cash = game.cash;
-      data.missionIndex = game.missionIndex;
-      data.missionStep = game.missionStep;
-      data.wanted = game.wanted;
-      data.player = this.packPlayer(cole);
-      data.car = this.packCar(ride);
-      data.at = Date.now();
-      window.localStorage.setItem(SAVE_KEY, JSON.stringify(data));
-      return true;
-    } catch (e) {
-      return false;
-    }
-  }
-
-  load() {
-    try {
-      const raw = window.localStorage.getItem(SAVE_KEY);
-      if (!raw) return null;
-      const data = JSON.parse(raw);
-      if (!data) return null;
-      if (typeof data !== 'object') return null;
-      if (data.v !== 1) return null;
-      if (typeof data.cash !== 'number') return null;
-      if (typeof data.missionIndex !== 'number') return null;
-      return data;
-    } catch (e) {
+      window.localStorage.setItem(this.key, JSON.stringify(record));
+    } catch (err) {
+      console.warn('save failed', err);
       return null;
     }
+    return record;
   }
 
-  restorePlayer(game, saved) {
-    const cole = game.player;
-    if (!saved || !cole) return;
-    cole.pos.set(saved.x || 0, 0, saved.z || 0);
-    cole.heading = saved.heading || 0;
-    if (saved.health !== undefined && saved.health !== null) cole.health = saved.health;
-    else cole.health = cole.maxHealth;
-    if (saved.ammo !== undefined && saved.ammo !== null) cole.ammo = saved.ammo;
-    if (saved.weapon) cole.weapon = saved.weapon;
-    cole.mesh.position.copy(cole.pos);
-    cole.mesh.rotation.y = cole.heading;
+  // -- reading ------------------------------------------------------------
+
+  load() {
+    let raw = null;
+    try {
+      raw = window.localStorage.getItem(this.key);
+    } catch (err) {
+      return null;
+    }
+    if (!raw) return null;
+    let data = null;
+    try {
+      data = JSON.parse(raw);
+    } catch (err) {
+      return null;
+    }
+    if (!data || typeof data !== 'object') return null;
+    if (data.version !== SAVE_VERSION) return null;
+    if (typeof data.missionIndex !== 'number') return null;
+    return data;
   }
 
-  // Rebuild the saved car in the fresh world and seat Cole in it.
-  // Returns false when the car cannot be placed anywhere.
-  restoreCar(game, saved) {
-    const cole = game.player;
-    const spot = this.findCarSpot(game, saved.x, saved.z);
-    if (!spot) return false;
-    const ride = createCar(game, {
-      x: spot.x,
-      z: spot.z,
-      heading: saved.heading || 0,
-      color: saved.color,
-      name: saved.name,
-      isVan: !!saved.isVan,
-      parked: true,
-    });
-    if (saved.health !== undefined && saved.health !== null) ride.health = saved.health;
-    else ride.health = ride.maxHealth;
-    if (saved.special) ride.special = saved.special;
-    else ride.special = undefined;
-    if (ride.special === 'comet') game.cometGT = ride;
-    if (ride.special === 'bankvan') game.bankVan = ride;
-    ride.parked = false;
-    cole.car = ride;
-    cole.pos.copy(ride.pos);
-    cole.pos.y = 0;
-    cole.heading = ride.heading;
+  // -- applying -----------------------------------------------------------
+
+  // Sets the record's fields on the game exactly as given. main.js
+  // re-asserts missionIndex/missionStep around this call, so this must
+  // not second-guess them — apply, don't interpret.
+  apply(game, data) {
+    if (!data) return false;
+    if (typeof data.cash === 'number') game.cash = Math.max(0, data.cash);
+    if (typeof data.missionIndex === 'number') game.missionIndex = data.missionIndex;
+    if (typeof data.missionStep === 'number') game.missionStep = data.missionStep;
+    if (typeof data.missionActive === 'boolean') game.missionActive = data.missionActive;
+    else game.missionActive = true;
+    if (typeof data.missionTimer === 'number') game.missionTimer = data.missionTimer;
+    game.wanted = 0;
+    if (game.police) game.police.clearWanted(game);
+    if (data.player && game.player) {
+      game.player.health = Math.max(1, data.player.health || 100);
+      if (data.player.weapon) game.player.weapon = data.player.weapon;
+      if (typeof data.player.ammo === 'number') game.player.ammo = data.player.ammo;
+    }
     return true;
   }
 
-  // Put a saved run back. Returns where the story resumes: the job,
-  // the beat, and a note when something could not be restored.
-  apply(game, data) {
-    const cole = game.player;
-    game.cash = data.cash || 0;
-    game.wanted = data.wanted || 0;
-    const index = data.missionIndex | 0;
-    let step = data.missionStep | 0;
-    let note = '';
-    this.restorePlayer(game, data.player);
-    if (data.car && cole) {
-      const ok = this.restoreCar(game, data.car);
-      if (!ok) {
-        // The car is gone for good: restart its job from the first
-        // beat and say so, instead of stranding Cole on foot mid-job.
-        step = 0;
-        note = 'Your car could not be recovered, so the job restarts from the beginning.';
-      }
+  restorePlayer(game, saved) {
+    const p = game.player;
+    const rec = saved && saved.player;
+    if (!p || !rec) return false;
+    if (typeof rec.x === 'number' && typeof rec.z === 'number') {
+      p.pos.set(rec.x, 0, rec.z);
     }
-    return { index, step, note };
+    if (typeof rec.heading === 'number') {
+      p.heading = rec.heading;
+      p.camYaw = rec.heading;
+    }
+    if (typeof rec.health === 'number') p.health = Math.max(1, rec.health);
+    return true;
   }
 
-  // The saved spot if it is clear, else the nearest clear ring
-  // position. Null only when every ring is blocked too.
+  restoreCar(game, saved) {
+    const rec = saved && saved.car;
+    if (!rec || !game.player) return false;
+    // The exact saved spot may be occupied after a fresh page load
+    // (parked cars respawn randomly), so settle for the nearest clear
+    // patch of road instead of spawning inside another car.
+    const spot = this.findCarSpot(game, rec.x || 0, rec.z || 0);
+    const car = createCar(game, {
+      x: spot.x,
+      z: spot.z,
+      heading: rec.heading || 0,
+      health: typeof rec.hp === 'number' ? rec.hp : 100,
+      model: rec.model || 'sedan',
+      name: rec.name || undefined,
+      color: rec.color ?? undefined,
+      isVan: !!rec.isVan,
+      parked: false,
+      special: rec.special ?? null,
+    });
+    enterCar(game, car);
+    return true;
+  }
+
+  // Nearest clear patch of ground to (x, z): not inside a building and
+  // not on top of another car. Tries the spot itself, then rings out.
   findCarSpot(game, x, z) {
-    const probe = collideCircle(game, x, z, 2.1);
-    if (!probe.hit) return { x, z };
-    let i = 0;
-    while (i < FALLBACK_RINGS.length) {
-      const off = FALLBACK_RINGS[i];
-      const nx = x + off[0];
-      const nz = z + off[1];
-      if (!collideCircle(game, nx, nz, 2.1).hit) {
-        return { x: nx, z: nz };
-      }
-      i++;
+    const tries = [[0, 0]];
+    for (const r of [6, 12, 18, 30]) {
+      tries.push([r, 0], [-r, 0], [0, r], [0, -r], [r, r], [-r, -r], [r, -r], [-r, r]);
     }
-    return null;
+    for (const [dx, dz] of tries) {
+      const tx = clamp(x + dx, -230, 230);
+      const tz = clamp(z + dz, -230, 230);
+      if (this.spotBlocked(game, tx, tz)) continue;
+      return { x: tx, z: tz };
+    }
+    return { x: clamp(x, -230, 230), z: clamp(z, -230, 230) };
+  }
+
+  spotBlocked(game, x, z) {
+    if (game.colliders) {
+      const hit = collideCircle(game, x, z, 3);
+      if (hit && hit.hit) return true;
+    }
+    for (const c of game.cars || []) {
+      if (game.player && game.player.car === c) continue;
+      const d = Math.hypot(c.pos.x - x, c.pos.z - z);
+      if (d < 5) return true;
+    }
+    return false;
   }
 }

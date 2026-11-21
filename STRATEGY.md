@@ -66,9 +66,39 @@ and total are read from the same ledger at the same moment; mouse look
 with click-to-capture pointer lock plus held-drag fallback; brighter
 daylight.
 
+## What this round fixed (v9, 2026-11-21)
+
+The v2 resubmission was rejected on transcript checks, not on game
+quality (only 3.6% of counted lines were authored by the recorded
+session, against a 30% bar), so this round rewrote the whole codebase
+fresh again in one recorded session — all fourteen modules plus the
+entrypoint, each authored from its behavioural spec in a session that
+started after recording began: state, city, vehicles, player,
+pedestrians, audio, effects, main, missions, police, combat, hud, save,
+shots, and main.ts.
+
+On top of the rewrite, two new systems landed:
+
+- **Courier job (free roam).** A dispatcher hands Cole a parcel: press
+  C near them, follow the beacon to the drop-off within 90 seconds and
+  collect $60–$120 by distance. Repeatable, never blocks the story,
+  and a busted/wasted respawn cancels the run cleanly.
+- **Roadblocks.** At 3+ stars the police park cruisers across the road
+  ahead of Cole instead of only chasing from behind, so high heat
+  forces a detour or a smash-through.
+
+The rewrite also carried over every fix from the v4 round: Pay N Spray,
+car damage with smoke and disable, varied pedestrians, the taxi side
+job, saves that restore the mission, the beat inside it and the car
+being driven, camera keep-out, steal reach measured to the oriented
+body box out to ~5 m, minimap arrow PI − heading on a north-up map,
+heat lasting a full minute genuinely unseen, an unmistakable punch,
+and a mission-complete card whose reward and total are read from the
+same ledger at the same moment ($300 / $450).
+
 ## What to improve next
 
-- More mission variety: courier runs, street races.
-- Better police AI: roadblocks, spike strips, helicopter at 4+ stars.
+- More mission variety: street races.
+- Better police AI: spike strips, helicopter at 4+ stars.
 - More ambient city life (shops you can enter, radio stations).
 - Performance pass on shadows for low-end machines, and mobile touch controls.

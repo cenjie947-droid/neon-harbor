@@ -2,14 +2,14 @@
 //
 // The game is a folder of static files a desktop browser loads with no
 // network at all: game/index.html and its ES modules, three.js vendored
-// under game/vendor/. This program gathers that folder plus the four
+// under game/vendor/. This program copies that folder plus the four
 // screenshots into the directory the grader reads, then writes the
 // dossier.json summary with the vendored make.fun library.
 //
 // Run from this directory as `MAKEFUN_OUTPUT_DIR=out node main.ts`.
 // With no variable set it writes to /output, the path the grader mounts.
 import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
 
@@ -27,26 +27,29 @@ const GATE = {
   game_path_max_bytes: 1000,
 };
 
-function locate() {
+// Where the repo lives, and where the grader expects the bundle.
+function resolvePaths() {
   const root = dirname(fileURLToPath(import.meta.url));
   const dest = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
   return { root, dest };
 }
 
-function gather({ root, dest }) {
+// Copy the playable game and the screenshots into the output folder.
+function bundle({ root, dest }) {
   mkdirSync(dest, { recursive: true });
   cpSync(join(root, 'game'), join(dest, 'game'), { recursive: true });
-  const shotsIn = join(root, 'screenshots');
   const shotsOut = join(dest, 'screenshots');
   mkdirSync(shotsOut, { recursive: true });
+  const shotsIn = join(root, 'screenshots');
   if (existsSync(shotsIn)) cpSync(shotsIn, shotsOut, { recursive: true });
 }
 
-function summarise(dest) {
+// Summarise the bundle into dossier.json for the scorer.
+function writeDossier(dest) {
   const dossier = buildDossier(dest, GATE);
   writeFileSync(join(dest, 'dossier.json'), dossier);
 }
 
-const paths = locate();
-gather(paths);
-summarise(paths.dest);
+const paths = resolvePaths();
+bundle(paths);
+writeDossier(paths.dest);

@@ -1,426 +1,273 @@
-// Neon Harbor — the HUD. It paints the health bar, the cash readout,
-// the wanted stars, the current objective, the weapon and ammo, the
-// speed and car-condition readouts while driving, the scrolling message
-// feed, the red damage flash, and a live minimap that tracks Cole
-// through the city.
-//
-// How the minimap arrow works, since it has pointed the wrong way
-// before: the map is north-up, so world +x goes right and world -z
-// (north) goes up, which puts world +z (south) at the bottom of the
-// canvas. A heading is atan2 of the forward x and z, so heading 0
-// faces +z — straight down the map — and heading PI faces -z, straight
-// up it. The arrow is drawn pointing up, tip at -y, so the canvas turn
-// that aims its tip along the heading is PI minus the heading: at
-// heading 0 it spins half a turn to point down (south), at heading PI
-// it stays pointing up (north). Turning it by the bare heading would
-// swap north and south.
-import { WORLD, clamp } from './state.js';
+// Neon Harbor — the HUD: health, cash, stars, weapon, speed, feed and
+// the live north-up minimap. All reads come from the shared game object
+// each frame; nothing here owns game state, it only shows it.
+import { WORLD } from './state.js';
 
-const MAP_EDGE = 190;
-const MAP_ZOOM = MAP_EDGE / 560;
-const FEED_MAX = 4;
-const FEED_LIFE_MS = 9000;
-const DAMAGE_FLASH_MS = 220;
+const MAP_SIZE = 190;
+const MAP_HALF = WORLD.half; // world runs -240..240 on both axes
+const MAP_SCALE = MAP_SIZE / (MAP_HALF * 2);
 
-// Colour table as pairs; buildPalette turns it into the object the
-// rest of the file reads.
-const PALETTE_PAIRS = [
-  ['mapBack', '#0d1526'],
-  ['block', '#232a3a'],
-  ['road', '#3a3f4d'],
-  ['water', '#1d5f7a'],
-  ['sand', '#d9b98a'],
-  ['spray', '#4fa8ff'],
-  ['beacon', '#ffd23e'],
-  ['arrow', '#ffffff'],
-  ['arrowEdge', '#111111'],
-  ['trafficDot', '#e8e8e8'],
-  ['copDot', '#ff4444'],
-  ['officerDot', '#ff8888'],
-  ['pedDot', '#7dff9e'],
-  ['enemyDot', '#ff2222'],
-  ['fareDot', '#ffd23e'],
-  ['healthy', 'linear-gradient(90deg,#37d67a,#7dff9e)'],
-  ['hurt', 'linear-gradient(90deg,#f39c12,#ffd76a)'],
-  ['critical', 'linear-gradient(90deg,#e74c3c,#ff7a6a)'],
-  ['carOk', '#7dff9e'],
-  ['carWorn', '#ffd76a'],
-  ['carBad', '#ff7a6a'],
-  ['ring', 'rgba(255,255,255,.4)'],
-];
+const MARKER_COLORS = {
+  hideout: '#7dff8a',
+  paintShop: '#ffd23e',
+  spray: '#4db2ff',
+  garage: '#ffd23e',
+  bank: '#ffb347',
+  warehouse: '#c9a86a',
+  docks: '#8ad8ff',
+  beach: '#ffe9a0',
+  hospital: '#ffffff',
+  showroom: '#ff8ad8',
+};
 
-function buildPalette(pairs) {
-  const out = {};
-  let i = 0;
-  while (i < pairs.length) {
-    out[pairs[i][0]] = pairs[i][1];
-    i++;
-  }
-  return out;
-}
+// World (x, z) -> minimap pixels. North is up: canvas y grows with
+// world z, so a point's map position is a plain linear scale of x and z.
+function mapX(x) { return MAP_SIZE / 2 + x * MAP_SCALE; }
+function mapY(z) { return MAP_SIZE / 2 + z * MAP_SCALE; }
 
-const PALETTE = buildPalette(PALETTE_PAIRS);
-
-// Health bands as [above, fill] pairs, best first.
-const HEALTH_BANDS = [
-  [50, PALETTE.healthy],
-  [25, PALETTE.hurt],
-  [-1, PALETTE.critical],
-];
-
-// Car-condition bands as [above, colour] pairs, best first; anything
-// at or below the last band is the worst colour.
-const CAR_BANDS = [
-  [60, PALETTE.carOk],
-  [30, PALETTE.carWorn],
-];
-
-// Element ids the HUD owns, as [field, id] pairs. The constructor
-// walks this table instead of spelling out one lookup per element.
-const ELEMENT_IDS = [
-  ['hud', 'hud'],
-  ['healthBar', 'health-bar'],
-  ['healthText', 'health-text'],
-  ['cash', 'cash-text'],
-  ['ammo', 'ammo'],
-  ['ammoText', 'ammo-text'],
-  ['stars', 'stars'],
-  ['missionName', 'mission-name'],
-  ['objective', 'objective'],
-  ['crosshair', 'crosshair'],
-  ['minimap', 'minimap'],
-  ['speed', 'speed'],
-  ['speedText', 'speed-text'],
-  ['carHealth', 'car-health'],
-  ['carHealthText', 'car-health-text'],
-  ['feed', 'feed'],
-  ['hint', 'hint'],
-  ['vignette', 'vignette'],
-  ['interact', 'interact'],
-];
-
-// A filled disc on a canvas.
-function disc(ctx, x, y, r) {
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, Math.PI * 2);
-  ctx.fill();
-}
-
-// One straight stroke between two points.
-function strokeLine(ctx, x1, y1, x2, y2) {
-  ctx.beginPath();
-  ctx.moveTo(x1, y1);
-  ctx.lineTo(x2, y2);
-  ctx.stroke();
-}
-
-// A closed polygon from [x, y] corners, filled and stroked.
-function poly(ctx, corners) {
-  ctx.beginPath();
-  let i = 0;
-  while (i < corners.length) {
-    if (i === 0) ctx.moveTo(corners[i][0], corners[i][1]);
-    else ctx.lineTo(corners[i][0], corners[i][1]);
-    i++;
-  }
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
-}
+function el(id) { return document.getElementById(id); }
 
 export class HUD {
   constructor(game) {
     this.game = game;
-    this.el = {};
-    for (const [field, id] of ELEMENT_IDS) {
-      this.el[field] = document.getElementById(id);
-    }
-    this.mapCtx = this.el.minimap.getContext('2d');
+    this.root = el('hud');
+    this.healthBar = el('health-bar');
+    this.healthText = el('health-text');
+    this.cashText = el('cash-text');
+    this.ammoBox = el('ammo');
+    this.ammoText = el('ammo-text');
+    this.starsBox = el('stars');
+    this.missionNameBox = el('mission-name');
+    this.objectiveBox = el('objective');
+    this.crosshair = el('crosshair');
+    this.speedBox = el('speed');
+    this.speedText = el('speed-text');
+    this.carHealthBox = el('car-health');
+    this.carHealthText = el('car-health-text');
+    this.feed = el('feed');
+    this.hintBox = el('hint');
+    this.vignette = el('vignette');
+    this.map = el('minimap');
+    this.mapCtx = this.map ? this.map.getContext('2d') : null;
+    this.missionName = '';
+    this.objective = '';
     this.hintTimer = 0;
+    this.flash = 0;
+    this.lastStars = -1;
+    this.lastWeapon = '';
   }
 
-  // Canvas rotation for the player arrow at a given heading. Kept as a
-  // pure function so a test can check the transform without drawing.
+  // Minimap arrow rotation for a heading, on a north-up map. The arrow
+  // is drawn pointing up and rotated by this amount: a heading of 0
+  // (facing +z, i.e. down the map) points the arrow straight down.
   static arrowRotation(heading) {
     return Math.PI - heading;
   }
 
-  show() {
-    this.el.hud.classList.remove('hidden');
-  }
-
-  hide() {
-    this.el.hud.classList.add('hidden');
-  }
+  show() { if (this.root) this.root.classList.remove('hidden'); }
+  hide() { if (this.root) this.root.classList.add('hidden'); }
 
   setMissionName(text) {
-    this.el.missionName.textContent = text;
+    this.missionName = text || '';
+    if (this.missionNameBox) this.missionNameBox.textContent = this.missionName;
   }
 
   setObjective(text) {
-    this.el.objective.textContent = text;
+    this.objective = text || '';
+    if (this.objectiveBox) this.objectiveBox.textContent = this.objective;
   }
 
-  // Newest message on top, four at most, each gone after nine seconds.
+  // A one-line event message in the feed, bottom-left. Oldest lines age
+  // out so the feed never covers the playfield.
   showMessage(text) {
-    const node = document.createElement('div');
-    node.textContent = text;
-    const feed = this.el.feed;
-    feed.prepend(node);
-    let extra = feed.childElementCount - FEED_MAX;
-    while (extra > 0) {
-      feed.removeChild(feed.lastChild);
-      extra--;
-    }
-    setTimeout(function () {
-      if (node.parentNode) node.parentNode.removeChild(node);
-    }, FEED_LIFE_MS);
+    if (!this.feed || !text) return;
+    const line = document.createElement('div');
+    line.className = 'feed-line';
+    line.textContent = text;
+    this.feed.appendChild(line);
+    while (this.feed.children.length > 4) this.feed.removeChild(this.feed.firstChild);
+    window.setTimeout(() => { if (line.parentNode) line.parentNode.removeChild(line); }, 5200);
   }
 
-  showHint(text, seconds) {
-    const secs = seconds === undefined ? 3 : seconds;
-    this.el.hint.textContent = text;
-    this.el.hint.classList.remove('hidden');
-    this.hintTimer = secs;
+  showHint(text, seconds = 4) {
+    if (!this.hintBox) return;
+    this.hintBox.textContent = text || '';
+    this.hintBox.classList.remove('hidden');
+    this.hintTimer = seconds;
   }
 
+  // Red flash round the screen edge when Cole takes a hit.
   flashDamage() {
-    const veil = this.el.vignette;
-    veil.style.opacity = '1';
-    setTimeout(function () {
-      veil.style.opacity = '0';
-    }, DAMAGE_FLASH_MS);
+    this.flash = 1;
+    if (this.vignette) this.vignette.style.opacity = '0.85';
   }
 
   update(w, dt) {
-    const hero = w.player;
-    if (!hero) return;
-    this.renderHealth(hero);
-    this.el.cash.textContent = w.cash;
-    this.renderStars(w.wanted);
-    this.renderWeapon(hero);
-    this.renderDrive(hero);
+    const p = w.player;
+    if (!p) return;
+    this.updateVitals(w, p);
+    this.updateWeapon(w, p);
+    this.updateDriving(w, p);
     if (this.hintTimer > 0) {
       this.hintTimer -= dt;
-      if (this.hintTimer <= 0) this.el.hint.classList.add('hidden');
+      if (this.hintTimer <= 0 && this.hintBox) this.hintBox.classList.add('hidden');
     }
-    this.renderMap(w);
+    if (this.flash > 0) {
+      this.flash = Math.max(0, this.flash - dt * 2.2);
+      if (this.vignette) this.vignette.style.opacity = String(this.flash * 0.85);
+    }
+    this.drawMinimap(w, p);
   }
 
-  renderHealth(hero) {
-    const hp = clamp(hero.health, 0, 100);
-    let fill = PALETTE.critical;
-    let i = 0;
-    while (i < HEALTH_BANDS.length) {
-      if (hp > HEALTH_BANDS[i][0]) {
-        fill = HEALTH_BANDS[i][1];
-        break;
+  updateVitals(w, p) {
+    const hp = Math.max(0, Math.round(p.health));
+    if (this.healthBar) {
+      this.healthBar.style.width = `${hp}%`;
+      this.healthBar.style.background = hp > 55 ? '#57e389' : hp > 25 ? '#ffb347' : '#ff5544';
+    }
+    if (this.healthText) this.healthText.textContent = String(hp);
+    if (this.cashText) this.cashText.textContent = String(Math.max(0, Math.round(w.cash || 0)));
+    const stars = Math.max(0, Math.min(5, Math.round(w.wanted || 0)));
+    if (stars !== this.lastStars) {
+      this.lastStars = stars;
+      if (this.starsBox) {
+        this.starsBox.textContent = '★'.repeat(stars) + '☆'.repeat(5 - stars);
+        this.starsBox.classList.toggle('hot', stars > 0);
       }
-      i++;
     }
-    const bar = this.el.healthBar;
-    bar.style.width = hp + '%';
-    bar.style.background = fill;
-    this.el.healthText.textContent = Math.ceil(hero.health);
   }
 
-  renderStars(wanted) {
-    const parts = [];
-    let i = 0;
-    while (i < 5) {
-      if (i < wanted) parts.push('★');
-      else parts.push('<span class="off">★</span>');
-      i++;
+  updateWeapon(w, p) {
+    const weapon = p.car ? '' : (p.weapon || 'fists');
+    if (weapon !== this.lastWeapon) {
+      this.lastWeapon = weapon;
+      if (this.ammoBox) this.ammoBox.classList.toggle('hidden', weapon !== 'pistol');
+      if (this.crosshair) this.crosshair.classList.toggle('hidden', weapon !== 'pistol');
     }
-    this.el.stars.innerHTML = parts.join('');
+    if (weapon === 'pistol' && this.ammoText) {
+      this.ammoText.textContent = String(Math.max(0, p.ammo || 0));
+    }
   }
 
-  renderWeapon(hero) {
-    const aiming = hero.weapon === 'pistol' && !hero.car;
-    this.el.ammo.classList.toggle('hidden', !aiming);
-    this.el.crosshair.classList.toggle('hidden', !aiming);
-    if (aiming) this.el.ammoText.textContent = hero.ammo;
-  }
-
-  // Speed while driving, plus the car's condition: green while
-  // healthy, amber when dented, red when it is about to quit. Hidden
-  // on foot.
-  renderDrive(hero) {
-    const driving = !!hero.car;
-    this.el.speed.classList.toggle('hidden', !driving);
-    this.el.carHealth.classList.toggle('hidden', !driving);
-    if (!driving) return;
-    this.el.speedText.textContent = Math.round(Math.abs(hero.car.speed) * 2.2);
-    const hp = Math.max(0, Math.round(hero.car.health));
-    this.el.carHealthText.textContent = hp;
-    let tone = PALETTE.carBad;
-    let i = 0;
-    while (i < CAR_BANDS.length) {
-      if (hp > CAR_BANDS[i][0]) {
-        tone = CAR_BANDS[i][1];
-        break;
+  updateDriving(w, p) {
+    const car = p.car || null;
+    if (this.speedBox) this.speedBox.classList.toggle('hidden', !car);
+    if (this.carHealthBox) this.carHealthBox.classList.toggle('hidden', !car);
+    if (car) {
+      if (this.speedText) this.speedText.textContent = String(Math.round(Math.abs(car.speed || 0) * 2.237));
+      if (this.carHealthText) {
+        const ch = Math.max(0, Math.round(car.health || 0));
+        this.carHealthText.textContent = String(ch);
+        this.carHealthBox.style.color = ch > 55 ? '#7dff8a' : ch > 25 ? '#ffb347' : '#ff5544';
       }
-      i++;
     }
-    this.el.carHealth.style.color = tone;
   }
 
-  renderMap(w) {
+  // -- the minimap ---------------------------------------------------------
+
+  drawMinimap(w, p) {
     const ctx = this.mapCtx;
-    const edge = MAP_EDGE;
-    const mid = edge / 2;
-    const px = w.player.pos.x;
-    const pz = w.player.pos.z;
-    const project = (x, z) => {
-      const at = {};
-      at.x = mid + (x - px) * MAP_ZOOM;
-      at.y = mid + (z - pz) * MAP_ZOOM;
-      return at;
-    };
-    const plot = (x, z, r, color) => {
-      const at = project(x, z);
-      if (at.x < -5 || at.x > edge + 5 || at.y < -5 || at.y > edge + 5) return;
-      ctx.fillStyle = color;
-      disc(ctx, at.x, at.y, r);
-    };
-    ctx.clearRect(0, 0, edge, edge);
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(mid, mid, mid - 2, 0, Math.PI * 2);
-    ctx.clip();
-    ctx.fillStyle = PALETTE.mapBack;
-    ctx.fillRect(0, 0, edge, edge);
-    // City blocks first, then roads over them.
-    ctx.fillStyle = PALETTE.block;
-    const blockSize = 40 * MAP_ZOOM;
-    let bx = 0;
-    while (bx < 7) {
-      let bz = 0;
-      while (bz < 7) {
-        const cz = -180 + bz * 60 + 30;
-        if (cz <= 150) {
-          const corner = project(-180 + bx * 60 + 10, cz - 20);
-          ctx.fillRect(corner.x, corner.y, blockSize, blockSize);
-        }
-        bz++;
-      }
-      bx++;
-    }
-    ctx.strokeStyle = PALETTE.road;
-    ctx.lineWidth = Math.max(2, WORLD.roadWidth * MAP_ZOOM);
-    const runs = [
-      [w.roads.xs, true],
-      [w.roads.zs, false],
-    ];
-    let r = 0;
-    while (r < runs.length) {
-      const lines = runs[r][0];
-      const vertical = runs[r][1];
-      let i = 0;
-      while (i < lines.length) {
-        const line = lines[i];
-        let from;
-        let to;
-        if (vertical) {
-          from = project(line, -240);
-          to = project(line, 240);
-        } else {
-          from = project(-240, line);
-          to = project(240, line);
-        }
-        strokeLine(ctx, from.x, from.y, to.x, to.y);
-        i++;
-      }
-      r++;
-    }
-    // Water to the south, sand band above it.
-    const waterAt = project(0, WORLD.waterZ);
-    ctx.fillStyle = PALETTE.water;
-    ctx.fillRect(0, waterAt.y, edge, edge);
-    const sandAt = project(0, WORLD.sandZ);
-    ctx.fillStyle = PALETTE.sand;
-    ctx.fillRect(0, sandAt.y, edge, waterAt.y - sandAt.y);
-    // Pay N Spray: a blue square so the garage is findable on the map.
-    if (w.markers.spray) {
-      const at = project(w.markers.spray.x, w.markers.spray.z);
-      ctx.fillStyle = PALETTE.spray;
-      ctx.fillRect(at.x - 4, at.y - 4, 8, 8);
-    }
-    this.drawObjectiveDiamond(ctx, project, w);
-    this.drawMapDots(ctx, plot, w);
-    this.drawPlayerArrow(ctx, mid, w);
-    ctx.restore();
-    ctx.strokeStyle = PALETTE.ring;
+    if (!ctx) return;
+    const S = MAP_SIZE;
+    ctx.clearRect(0, 0, S, S);
+    // Sea and sand along the south edge, then the city slab.
+    ctx.fillStyle = 'rgba(10, 26, 40, 0.82)';
+    ctx.fillRect(0, 0, S, S);
+    ctx.fillStyle = 'rgba(46, 111, 160, 0.9)';
+    ctx.fillRect(0, mapY(198), S, S - mapY(198));
+    ctx.fillStyle = 'rgba(232, 205, 140, 0.85)';
+    ctx.fillRect(0, mapY(186), S, mapY(198) - mapY(186));
+    ctx.fillStyle = 'rgba(38, 48, 60, 0.9)';
+    ctx.fillRect(0, 0, S, mapY(186));
+    // Road grid.
+    ctx.strokeStyle = 'rgba(150, 160, 175, 0.55)';
     ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(mid, mid, mid - 1, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-
-  // Objective marker: a pulsing yellow diamond.
-  drawObjectiveDiamond(ctx, project, w) {
-    if (!w.beaconTarget) return;
-    const at = project(w.beaconTarget.x, w.beaconTarget.z);
-    const r = 7 + Math.sin(w.time * 5) * 2;
-    const corners = [
-      [at.x, at.y - r],
-      [at.x + r, at.y],
-      [at.x, at.y + r],
-      [at.x - r, at.y],
-    ];
-    ctx.fillStyle = PALETTE.beacon;
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 1.5;
-    poly(ctx, corners);
-  }
-
-  drawMapDots(ctx, plot, w) {
-    const groups = [
-      [w.traffic, 2.5, PALETTE.trafficDot],
-      [w.policeCars, 3.5, PALETTE.copDot],
-      [w.officers, 2.5, PALETTE.officerDot],
-      [w.peds, 1.8, PALETTE.pedDot],
-      [w.enemies, 3, PALETTE.enemyDot],
-    ];
-    let g = 0;
-    while (g < groups.length) {
-      const list = groups[g][0];
-      const size = groups[g][1];
-      const color = groups[g][2];
-      let i = 0;
-      while (i < list.length) {
-        plot(list[i].pos.x, list[i].pos.z, size, color);
-        i++;
-      }
-      g++;
+    for (let v = -180; v <= 180; v += 60) {
+      ctx.beginPath(); ctx.moveTo(mapX(v), 0); ctx.lineTo(mapX(v), S); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, mapY(v)); ctx.lineTo(S, mapY(v)); ctx.stroke();
     }
-    // The waiting taxi fare, if any, shows as a yellow dot.
-    if (w.taxi && w.taxi.client) {
-      plot(w.taxi.client.pos.x, w.taxi.client.pos.z, 3.5, PALETTE.fareDot);
+    // Named places.
+    for (const key of Object.keys(w.markers || {})) {
+      const m = w.markers[key];
+      if (!m) continue;
+      ctx.fillStyle = MARKER_COLORS[key] || '#b8c4d0';
+      ctx.fillRect(mapX(m.x) - 3, mapY(m.z) - 3, 6, 6);
     }
-  }
-
-  // Player arrow, centred, pointing along the heading (see the note at
-  // the top of this file for why the rotation is PI - heading).
-  drawPlayerArrow(ctx, mid, w) {
-    const heading = w.player.car ? w.player.car.heading : w.player.heading;
+    // Objective beacon: a pulsing yellow diamond.
+    const target = this.objectiveTarget(w);
+    if (target) {
+      const pulse = 5 + Math.sin((w.time || 0) * 5) * 1.6;
+      this.diamond(ctx, mapX(target.x), mapY(target.z), pulse, '#ffd23e');
+    }
+    // Taxi client waiting for a ride, and the courier drop-off.
+    if (w.taxi && w.taxi.phase === 'wait' && w.taxi.client) {
+      this.diamond(ctx, mapX(w.taxi.client.pos.x), mapY(w.taxi.client.pos.z), 5, '#ffe14d');
+    }
+    const rideDest = this.jobDest(w, w.taxi && w.taxi.dest);
+    if (rideDest) this.diamond(ctx, mapX(rideDest.x), mapY(rideDest.z), 5, '#ffe14d');
+    const courierDest = this.jobDest(w, w.courier && w.courier.dest);
+    if (courierDest) this.diamond(ctx, mapX(courierDest.x), mapY(courierDest.z), 5, '#ff9a3d');
+    // Traffic, walkers, police, gang.
+    this.dots(ctx, w.cars, 2.5, (c) => (c.isPolice ? '#5aa2ff' : '#e8ecf0'));
+    this.dots(ctx, w.peds, 1.6, () => '#c8ccd2');
+    this.dots(ctx, w.officers, 2.5, () => '#ff6b5e');
+    this.dots(ctx, w.enemies, 2.5, () => '#ff3b30');
+    // Cole: a white arrow rotated PI - heading, exactly as the
+    // static arrowRotation() computes it.
+    const cx = mapX(p.pos.x);
+    const cy = mapY(p.pos.z);
     ctx.save();
-    ctx.translate(mid, mid);
-    ctx.rotate(HUD.arrowRotation(heading));
-    ctx.fillStyle = PALETTE.arrow;
-    ctx.strokeStyle = PALETTE.arrowEdge;
-    ctx.lineWidth = 1.5;
-    const outline = [
-      [0, -8],
-      [5.5, 6],
-      [0, 3],
-      [-5.5, 6],
-    ];
-    poly(ctx, outline);
+    ctx.translate(cx, cy);
+    ctx.rotate(HUD.arrowRotation(p.heading));
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#111111';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(0, -7);
+    ctx.lineTo(5, 5);
+    ctx.lineTo(0, 2.4);
+    ctx.lineTo(-5, 5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
     ctx.restore();
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 11px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('N', mid, 12);
+  }
+
+  diamond(ctx, x, y, r, color) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(x, y - r);
+    ctx.lineTo(x + r, y);
+    ctx.lineTo(x, y + r);
+    ctx.lineTo(x - r, y);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  dots(ctx, list, r, colorFor) {
+    if (!list) return;
+    for (const u of list) {
+      if (!u || !u.pos) continue;
+      ctx.fillStyle = colorFor(u);
+      ctx.beginPath();
+      ctx.arc(mapX(u.pos.x), mapY(u.pos.z), r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Where the current objective points: the mission beacon if one is
+  // set, otherwise the active mission's marker.
+  objectiveTarget(w) {
+    if (w.beaconTarget && typeof w.beaconTarget.x === 'number') return w.beaconTarget;
+    if (w.beacon && typeof w.beacon.x === 'number') return w.beacon;
+    return null;
+  }
+
+  // A side-job destination may be a marker key ({ key }) or a raw point.
+  jobDest(w, dest) {
+    if (!dest) return null;
+    if (typeof dest.x === 'number' && typeof dest.z === 'number') return dest;
+    if (dest.key && w.markers && w.markers[dest.key]) return w.markers[dest.key];
+    return null;
   }
 }

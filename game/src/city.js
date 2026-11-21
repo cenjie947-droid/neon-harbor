@@ -1,346 +1,393 @@
-// Neon Harbor — procedural coastal city.
+// Neon Harbor — the procedural sun-soaked coastal city.
 //
-// Builds the whole island in one pass: a downtown road grid, a harbor
-// beach with a pier and a ferris wheel, dockside warehouses and quiet
-// residential blocks. Everything the rest of the game needs is left on
-// the world object: the ten named markers, the road grid, the building
-// colliders, and handles to the sun, the sea and the ferris wheel.
+// One build pass lays out the whole map: a downtown tower grid, a
+// beach and harbor with a pier and ferris wheel along the south edge,
+// dockside warehouses on the west side, and low residential blocks
+// around the outside. Everything a mission or the HUD needs to navigate
+// is recorded in `world.markers` (ten named spots), `world.roads` (the
+// grid lines) and `world.colliders` (one box per solid building, so the
+// player, cars and police sightlines all agree on what is solid).
 //
-// The look is deliberately bright: a high pale sun, a light-blue sky and
-// pale buildings, so the city reads as sun-soaked at noon rather than
-// moody at dusk. Roads are flat dark strips laid over a pale ground
-// plane; buildings are simple boxes with a roof slab, which keeps the
-// mesh count low and the headless renderer fast.
-
+// Daylight is kept bright on purpose: a high pale sun, a light-blue sky
+// and a warm haze, so the city reads as a sunny harbor town, not a
+// night map.
 import * as THREE from 'three';
-import { WORLD, rand, randInt, pick } from './state.js';
+import { WORLD, GRID_LINES, rand, randInt, pick } from './state.js';
 
-// The road grid: seven avenues each way, 60 m apart, 10 m wide.
-const GRID = [-180, -120, -60, 0, 60, 120, 180];
-// Centres of the 50 m blocks that sit between the roads.
 const BLOCKS = [-150, -90, -30, 30, 90, 150];
 
-const MARKER_SPOTS = {
-  bank: { x: -120, z: -120, color: 0xffc93c, label: 'Harbor Bank' },
-  beach: { x: 0, z: 205, color: 0x35c4dc, label: 'Neon Beach' },
-  docks: { x: -120, z: 180, color: 0xff7a1a, label: 'The Docks' },
-  garage: { x: 0, z: -120, color: 0xb678ff, label: "Mara's Garage" },
-  hideout: { x: -60, z: -60, color: 0x58d68d, label: 'Hideout' },
-  hospital: { x: 180, z: -60, color: 0xffffff, label: 'St. Aurelia Hospital' },
-  paintShop: { x: 60, z: 120, color: 0xff4fa3, label: 'Paint Shop' },
-  showroom: { x: 120, z: -120, color: 0xffe14d, label: 'Showroom' },
-  spray: { x: 120, z: 60, color: 0x3f8cff, label: 'Pay N Spray' },
-  warehouse: { x: -180, z: 60, color: 0xc98a4b, label: 'Warehouse' },
-};
+const TOWER_BASES = [0x7fa8c9, 0xc9a06a, 0x9aa5ad, 0xb08a7a, 0x6f8fa8, 0xc2b49a];
+const HOUSE_BASES = [0xe0cfa8, 0xd9a08a, 0xa8c4b8, 0xe8e2d4, 0xc9b8d9, 0xf0d9a0];
+const ROOF_COLORS = [0x8a4a3a, 0x4a5a6a, 0x6a5a4a, 0x7a3a3a, 0x3a4a5a];
 
-// Pale, sun-bleached facades with a few glass towers mixed in.
-const FACADE = [
-  0xe8e0d0, 0xdfe8ee, 0xf2d8b8, 0xd8cfc0, 0xcfe0e8,
-  0xe8c8a8, 0xd0d8c8, 0xf0e8d8, 0xc8d8e8, 0xe0c8d0,
-];
-const GLASS = [0x9fc8e8, 0x7fb8d8, 0xa8d0e0, 0x8fb8c8];
-
-function flatBox(w, h, d, color, x, y, z, parent) {
-  const mesh = new THREE.Mesh(
-    new THREE.BoxGeometry(w, h, d),
-    new THREE.MeshLambertMaterial({ color }),
-  );
-  mesh.position.set(x, y, z);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  parent.add(mesh);
-  return mesh;
+function std(color, roughness = 0.85, metalness = 0.05) {
+  return new THREE.MeshStandardMaterial({ color, roughness, metalness });
 }
 
-function groundPlane(w, d, color, x, z, y, parent) {
-  const mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(w, d),
-    new THREE.MeshLambertMaterial({ color }),
-  );
-  mesh.rotation.x = -Math.PI / 2;
-  mesh.position.set(x, y, z);
-  mesh.receiveShadow = true;
-  parent.add(mesh);
-  return mesh;
+// A canvas facade: lit and dark window panes over a base colour, so a
+// plain box reads as a tower without a separate mesh per window.
+function facadeTexture(base, height) {
+  const c = document.createElement('canvas');
+  c.width = 128;
+  c.height = 256;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#' + base.toString(16).padStart(6, '0');
+  ctx.fillRect(0, 0, 128, 256);
+  const cols = 6;
+  const rows = 14;
+  for (let r = 0; r < rows; r++) {
+    for (let col = 0; col < cols; col++) {
+      const lit = Math.random() < 0.35;
+      ctx.fillStyle = lit ? '#ffd98a' : '#2e3d4d';
+      ctx.fillRect(8 + col * 20, 10 + r * 17, 13, 11);
+    }
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(1, Math.max(1, Math.round(height / 30)));
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
 }
 
-// One downtown block: a single big slab that fills the middle of the
-// block, so a player ducking into a block centre is hidden from the
-// roads by solid walls on every side. Towers grow taller toward the
-// middle of the map; the outer ring stays low.
-function raiseBlock(world, cx, cz) {
+function boxMesh(scene, w, h, d, material, x, y, z) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
+  m.position.set(x, y, z);
+  m.castShadow = true;
+  m.receiveShadow = true;
+  scene.add(m);
+  return m;
+}
+
+function addCollider(world, x, z, hw, hd) {
+  world.colliders.push({ x, z, hw, hd });
+}
+
+function tower(world, cx, cz) {
+  const hw = rand(11, 16);
+  const hd = rand(11, 16);
+  const h = rand(24, 58);
+  const mat = new THREE.MeshStandardMaterial({
+    map: facadeTexture(pick(TOWER_BASES), h),
+    roughness: 0.85,
+  });
+  boxMesh(world.scene, hw * 2, h, hd * 2, mat, cx, h / 2, cz);
+  addCollider(world, cx, cz, hw, hd);
+  // Roof slab and, on half the towers, a rooftop plant box or antenna.
+  boxMesh(world.scene, hw * 2 + 1, 1.2, hd * 2 + 1, std(0x3a3f46, 0.9), cx, h + 0.6, cz);
+  if (Math.random() < 0.5) {
+    boxMesh(world.scene, 3, 2, 3, std(0x565d66, 0.9), cx + rand(-6, 6), h + 2.2, cz + rand(-6, 6));
+  } else {
+    const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 7, 6), std(0x888888, 0.6, 0.6));
+    ant.position.set(cx, h + 4.5, cz);
+    world.scene.add(ant);
+  }
+}
+
+function house(world, cx, cz) {
+  const hw = rand(6, 9);
+  const hd = rand(6, 9);
+  const h = rand(5, 9);
+  const base = pick(HOUSE_BASES);
+  boxMesh(world.scene, hw * 2, h, hd * 2, std(base, 0.9), cx, h / 2, cz);
+  addCollider(world, cx, cz, hw, hd);
+  // Flat slab roof in a contrasting colour, plus a chimney.
+  boxMesh(world.scene, hw * 2 + 0.8, 0.7, hd * 2 + 0.8, std(pick(ROOF_COLORS), 0.9), cx, h + 0.35, cz);
+  if (Math.random() < 0.6) {
+    boxMesh(world.scene, 1, 1.8, 1, std(0x8a6a5a, 0.9), cx + hw * 0.5, h + 1.2, cz - hd * 0.4);
+  }
+}
+
+function warehouse(world, cx, cz, color) {
+  const hw = 20;
+  const hd = 13;
+  const h = 9;
+  boxMesh(world.scene, hw * 2, h, hd * 2, std(color, 0.9), cx, h / 2, cz);
+  addCollider(world, cx, cz, hw, hd);
+  boxMesh(world.scene, hw * 2 + 1, 0.8, hd * 2 + 1, std(0x4a4f55, 0.9), cx, h + 0.4, cz);
+  // Roller door on the road side.
+  boxMesh(world.scene, 8, 5, 0.4, std(0x2e3238, 0.7, 0.3), cx, 2.5, cz + hd + 0.2);
+}
+
+function shippingContainer(world, x, z, color, ry) {
+  const m = boxMesh(world.scene, 6.4, 2.6, 2.6, std(color, 0.9), x, 1.3, z);
+  m.rotation.y = ry || 0;
+  const ext = Math.abs(Math.cos(ry || 0)) > 0.7 ? { hw: 3.2, hd: 1.3 } : { hw: 1.3, hd: 3.2 };
+  addCollider(world, x, z, ext.hw, ext.hd);
+}
+
+function tree(world, x, z) {
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.22, 1.8, 6), std(0x6a4a2a, 0.95));
+  trunk.position.set(x, 0.9, z);
+  trunk.castShadow = true;
+  world.scene.add(trunk);
+  const top = new THREE.Mesh(new THREE.SphereGeometry(rand(1.0, 1.5), 8, 6), std(pick([0x4a8a3a, 0x5a9a44, 0x3a7a34]), 0.95));
+  top.position.set(x, 2.6, z);
+  top.castShadow = true;
+  world.scene.add(top);
+}
+
+function buildGround(world) {
   const scene = world.scene;
-  const fromCentre = Math.max(Math.abs(cx), Math.abs(cz));
-  const tall = fromCentre <= 90;
-  const height = tall
-    ? rand(26, 68)
-    : rand(9, 24);
-  const glass = tall && Math.random() < 0.45;
-  const color = glass ? pick(GLASS) : pick(FACADE);
-  const w = 34;
-  const d = 34;
-  const body = flatBox(w, height, d, color, cx, height / 2, cz, scene);
-  body.userData.isBuilding = true;
-  // A thin roof slab and, on the tallest towers, a rooftop box.
-  flatBox(w + 1, 1.2, d + 1, 0x8a8078, cx, height + 0.6, cz, scene);
-  if (height > 45) {
-    flatBox(10, 6, 10, 0x6a6a72, cx, height + 4, cz, scene);
-  }
-  world.colliders.push({ x: cx, z: cz, hw: w / 2, hd: d / 2 });
-}
-
-// A low warehouse slab for the dockside blocks, long and flat.
-function raiseWarehouse(world, cx, cz) {
-  const scene = world.scene;
-  const w = 40;
-  const d = 22;
-  const h = 11;
-  flatBox(w, h, d, 0xb8a88e, cx, h / 2, cz, scene);
-  flatBox(w + 1, 1, d + 1, 0x5a5a62, cx, h + 0.5, cz, scene);
-  world.colliders.push({ x: cx, z: cz, hw: w / 2, hd: d / 2 });
-}
-
-// A small floating pin above a marker, plus a painted ring on the
-// ground, so every named place is visible from a distance.
-function markerPin(world, key, spot) {
-  const scene = world.scene;
-  const pin = new THREE.Mesh(
-    new THREE.OctahedronGeometry(1.6),
-    new THREE.MeshBasicMaterial({ color: spot.color }),
-  );
-  pin.position.set(spot.x, 7, spot.z);
-  scene.add(pin);
-  world.markerPins = world.markerPins || {};
-  world.markerPins[key] = pin;
-  const ring = new THREE.Mesh(
-    new THREE.RingGeometry(2.6, 3.4, 28),
-    new THREE.MeshBasicMaterial({ color: spot.color, side: THREE.DoubleSide }),
-  );
-  ring.rotation.x = -Math.PI / 2;
-  ring.position.set(spot.x, 0.06, spot.z);
-  scene.add(ring);
-}
-
-// The Pay N Spray pad: a painted rectangle on the road with a yellow
-// awning on posts at its north edge, high enough for any car to pass.
-function sprayPad(world, spot) {
-  const scene = world.scene;
-  groundPlane(12, 12, 0x2a2f36, spot.x, spot.z, 0.045, scene);
-  const edge = new THREE.Mesh(
-    new THREE.RingGeometry(5.2, 6, 4, 1),
-    new THREE.MeshBasicMaterial({ color: 0xffd23c, side: THREE.DoubleSide }),
-  );
-  edge.rotation.x = -Math.PI / 2;
-  edge.rotation.z = Math.PI / 4;
-  edge.position.set(spot.x, 0.06, spot.z);
-  scene.add(edge);
-  const awn = new THREE.Mesh(
-    new THREE.PlaneGeometry(12, 5),
-    new THREE.MeshLambertMaterial({ color: 0xffd23c, side: THREE.DoubleSide }),
-  );
-  awn.rotation.x = -Math.PI / 2 + 0.25;
-  awn.position.set(spot.x, 4.6, spot.z - 7.5);
-  awn.castShadow = true;
-  scene.add(awn);
-  for (const dx of [-5.5, 5.5]) {
-    const post = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.18, 0.18, 4.6, 8),
-      new THREE.MeshLambertMaterial({ color: 0x3a3f44 }),
-    );
-    post.position.set(spot.x + dx, 2.3, spot.z - 9.5);
-    post.castShadow = true;
-    scene.add(post);
-  }
-}
-
-// A pier of wooden boards running out into the sea, plus a ferris
-// wheel on the sand. The wheel's rim is the part that turns; the legs
-// stay put.
-function beachfront(world) {
-  const scene = world.scene;
-  // Pier at x = -40, boards from the sand out over the water.
-  groundPlane(9, 52, 0xa8825a, -40, 224, 0.05, scene);
-  for (let i = 0; i < 6; i++) {
-    const post = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.35, 0.35, 2.4, 8),
-      new THREE.MeshLambertMaterial({ color: 0x6a4a2a }),
-    );
-    post.position.set(-40 + (i % 2 === 0 ? -4 : 4), 0.4, 206 + i * 8);
-    scene.add(post);
-  }
-  // Ferris wheel at (40, 212), facing the city.
-  const wheelGroup = new THREE.Group();
-  wheelGroup.position.set(40, 0, 212);
-  const spinner = new THREE.Group();
-  spinner.position.y = 20;
-  const rim = new THREE.Mesh(
-    new THREE.TorusGeometry(16, 0.7, 10, 40),
-    new THREE.MeshLambertMaterial({ color: 0xff5a7a }),
-  );
-  spinner.add(rim);
-  for (let i = 0; i < 8; i++) {
-    const a = (i / 8) * Math.PI * 2;
-    const spoke = new THREE.Mesh(
-      new THREE.BoxGeometry(0.5, 31, 0.5),
-      new THREE.MeshLambertMaterial({ color: 0xf2f2f2 }),
-    );
-    spoke.rotation.z = a;
-    spinner.add(spoke);
-    const cabin = new THREE.Mesh(
-      new THREE.BoxGeometry(2.4, 2.4, 2.4),
-      new THREE.MeshLambertMaterial({ color: pick([0xffd23c, 0x35c4dc, 0xff7a1a, 0x58d68d]) }),
-    );
-    cabin.position.set(Math.sin(a) * 16, Math.cos(a) * 16, 0);
-    spinner.add(cabin);
-  }
-  const hub = new THREE.Mesh(
-    new THREE.CylinderGeometry(1.6, 1.6, 2.5, 12),
-    new THREE.MeshLambertMaterial({ color: 0x3a3f44 }),
-  );
-  hub.rotation.x = Math.PI / 2;
-  spinner.add(hub);
-  wheelGroup.add(spinner);
-  for (const dx of [-7, 7]) {
-    const leg = new THREE.Mesh(
-      new THREE.BoxGeometry(1.4, 22, 1.4),
-      new THREE.MeshLambertMaterial({ color: 0xe8e8e8 }),
-    );
-    leg.position.set(dx, 10, 0);
-    leg.rotation.z = dx > 0 ? -0.32 : 0.32;
-    leg.castShadow = true;
-    wheelGroup.add(leg);
-  }
-  scene.add(wheelGroup);
-  wheelGroup.userData.wheel = spinner;
-  world.ferris = wheelGroup;
-  // A few beach umbrellas for colour.
-  for (const [ux, uz, col] of [[-70, 206, 0xff5a7a], [10, 208, 0xffd23c], [90, 206, 0x35c4dc]]) {
-    const pole = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.12, 0.12, 3, 8),
-      new THREE.MeshLambertMaterial({ color: 0xeeeeee }),
-    );
-    pole.position.set(ux, 1.5, uz);
-    scene.add(pole);
-    const top = new THREE.Mesh(
-      new THREE.ConeGeometry(2.6, 1.2, 10),
-      new THREE.MeshLambertMaterial({ color: col }),
-    );
-    top.position.set(ux, 3.4, uz);
-    scene.add(top);
-  }
-}
-
-// Dockside crane and container stacks on the sand south of the docks.
-function docks(world) {
-  const scene = world.scene;
-  const crane = new THREE.Group();
-  crane.position.set(-150, 0, 194);
-  flatBox(3, 26, 3, 0xd8b13c, 0, 13, 0, crane);
-  const arm = flatBox(26, 2, 2, 0xd8b13c, 8, 24, 0, crane);
-  arm.castShadow = true;
-  flatBox(2, 6, 2, 0x3a3f44, 18, 20, 0, crane);
-  scene.add(crane);
-  const cols = [0xc0392b, 0x2471a3, 0x229954, 0xd4ac0d];
-  let i = 0;
-  for (const [cx, cz] of [[-172, 198], [-168, 204], [-140, 200], [-128, 196]]) {
-    flatBox(9, 3.4, 3.6, cols[i++ % cols.length], cx, 1.7, cz, scene);
-  }
-}
-
-// Street trees in the gaps between buildings and roads. They carry no
-// collider, so they never trap the player or a car.
-function plantTrees(world) {
-  const scene = world.scene;
-  for (let n = 0; n < 54; n++) {
-    const bx = pick(BLOCKS);
-    const bz = pick(BLOCKS);
-    const sx = Math.random() < 0.5 ? -1 : 1;
-    const sz = Math.random() < 0.5 ? -1 : 1;
-    const x = bx + sx * rand(20, 23);
-    const z = bz + sz * rand(20, 23);
-    if (Math.abs(x) > 235 || Math.abs(z) > 190) continue;
-    const trunk = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.25, 0.35, 2.6, 7),
-      new THREE.MeshLambertMaterial({ color: 0x6a4a2a }),
-    );
-    trunk.position.set(x, 1.3, z);
-    scene.add(trunk);
-    const crown = new THREE.Mesh(
-      new THREE.SphereGeometry(rand(1.6, 2.4), 8, 7),
-      new THREE.MeshLambertMaterial({ color: pick([0x4a8a3a, 0x5a9a44, 0x3a7a34]) }),
-    );
-    crown.position.set(x, 3.6, z);
-    crown.castShadow = true;
-    scene.add(crown);
-  }
-}
-
-export function buildCity(world) {
-  const scene = world.scene;
-  world.roads = { xs: [...GRID], zs: [...GRID] };
-  world.colliders = [];
-  world.markers = {};
-  for (const [key, spot] of Object.entries(MARKER_SPOTS)) {
-    world.markers[key] = { x: spot.x, z: spot.z, name: spot.label };
-  }
-
-  // Sky, light and ground.
-  scene.background = new THREE.Color(0x9fd4f2);
-  scene.fog = new THREE.Fog(0x9fd4f2, 260, 640);
-  const sun = new THREE.DirectionalLight(0xfff1cf, 2.8);
-  sun.position.set(140, 200, 80);
+  // Sky, haze and light: bright midday over the harbor.
+  scene.background = new THREE.Color(0x8ec9ee);
+  scene.fog = new THREE.Fog(0xa8d4f0, 300, 620);
+  const hemi = new THREE.HemisphereLight(0xcfe8ff, 0x9a8f78, 0.95);
+  scene.add(hemi);
+  const sun = new THREE.DirectionalLight(0xfff1d6, 2.4);
+  sun.position.set(140, 190, 80);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
   sun.shadow.camera.left = -260;
   sun.shadow.camera.right = 260;
   sun.shadow.camera.top = 260;
   sun.shadow.camera.bottom = -260;
-  sun.shadow.camera.near = 10;
-  sun.shadow.camera.far = 620;
+  sun.shadow.camera.far = 600;
   sun.shadow.bias = -0.0004;
   scene.add(sun);
   world.sun = sun;
-  const hemi = new THREE.HemisphereLight(0xcfe8ff, 0x9a8a6a, 1.15);
-  scene.add(hemi);
-  scene.add(new THREE.AmbientLight(0xffffff, 0.35));
 
-  // City ground, then the beach and sea to the south.
-  groundPlane(560, 480, 0x7fa06a, 0, -20, 0, scene);
-  groundPlane(560, 46, 0xe8d29a, 0, 209, 0.02, scene);
-  const sea = groundPlane(560, 340, 0x2f7fc4, 0, 392, 0.01, scene);
+  // City ground: pale warm grass-concrete.
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(WORLD.half * 2, WORLD.half * 2),
+    std(0x93a184, 1),
+  );
+  ground.rotation.x = -Math.PI / 2;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  // Sand strip along the south edge, then the sea beyond it.
+  const sand = new THREE.Mesh(
+    new THREE.PlaneGeometry(WORLD.half * 2, WORLD.half - WORLD.sandZ + 2),
+    std(0xe6d49a, 1),
+  );
+  sand.rotation.x = -Math.PI / 2;
+  sand.position.set(0, 0.02, (WORLD.sandZ + WORLD.half) / 2);
+  sand.receiveShadow = true;
+  scene.add(sand);
+
+  const sea = new THREE.Mesh(
+    new THREE.PlaneGeometry(WORLD.half * 2, 130),
+    new THREE.MeshStandardMaterial({ color: 0x2f88c4, roughness: 0.25, metalness: 0.1, transparent: true, opacity: 0.92 }),
+  );
+  sea.rotation.x = -Math.PI / 2;
+  sea.position.set(0, 0.05, WORLD.waterZ + 65);
+  scene.add(sea);
   world.sea = sea;
+}
 
-  // Roads: pale sidewalk ribbons with a dark asphalt strip on top, and
-  // a thin pale centre line so the grid reads at a glance.
-  for (const v of GRID) {
-    groundPlane(14, 480, 0xb8bcc0, v, -20, 0.02, scene);
-    groundPlane(480, 14, 0xb8bcc0, 0, v, 0.02, scene);
-    groundPlane(10, 480, 0x3a3f44, v, -20, 0.03, scene);
-    groundPlane(480, 10, 0x3a3f44, 0, v, 0.03, scene);
-    groundPlane(0.5, 480, 0xe8e8e8, v, -20, 0.04, scene);
-    groundPlane(480, 0.5, 0xe8e8e8, 0, v, 0.04, scene);
+function buildRoads(world) {
+  const scene = world.scene;
+  const asphalt = std(0x3d4148, 0.95);
+  const walk = std(0xb9b3a4, 0.95);
+  const roadLen = WORLD.half * 2;
+  for (const v of GRID_LINES) {
+    // One strip each way per grid line, plus a pale sidewalk on each side.
+    const alongX = new THREE.Mesh(new THREE.PlaneGeometry(roadLen, WORLD.roadWidth), asphalt);
+    alongX.rotation.x = -Math.PI / 2;
+    alongX.position.set(0, 0.03, v);
+    alongX.receiveShadow = true;
+    scene.add(alongX);
+    const alongZ = new THREE.Mesh(new THREE.PlaneGeometry(WORLD.roadWidth, roadLen), asphalt);
+    alongZ.rotation.x = -Math.PI / 2;
+    alongZ.position.set(v, 0.03, 0);
+    alongZ.receiveShadow = true;
+    scene.add(alongZ);
+    for (const off of [-6.4, 6.4]) {
+      const s1 = new THREE.Mesh(new THREE.PlaneGeometry(roadLen, 2.6), walk);
+      s1.rotation.x = -Math.PI / 2;
+      s1.position.set(0, 0.035, v + off);
+      scene.add(s1);
+      const s2 = new THREE.Mesh(new THREE.PlaneGeometry(2.6, roadLen), walk);
+      s2.rotation.x = -Math.PI / 2;
+      s2.position.set(v + off, 0.035, 0);
+      scene.add(s2);
+    }
   }
+}
 
-  // Buildings, block by block. The two dockside rows are warehouses.
-  for (const bx of BLOCKS) {
-    for (const bz of BLOCKS) {
-      if (bz >= 150) {
-        raiseWarehouse(world, bx, bz);
+function buildBlocks(world) {
+  // Special blocks get a named building; the rest follow their zone.
+  for (const cx of BLOCKS) {
+    for (const cz of BLOCKS) {
+      // Beachfront row stays low; the sand starts just south of it.
+      if (cx === 90 && cz === 150) continue; // paint shop, below
+      if (cx === 150 && cz === -30) continue; // Pay N Spray lot, below
+      if (cx === -30 && cz === -30) continue; // Mara's garage, below
+      if (cx === -30 && cz === 90) continue; // hospital, below
+      if (cx === -90 && cz === 30) continue; // hideout, below
+      if (cx === 150 && cz === 30) continue; // showroom, below
+      if (cx === 30 && cz === -30) { tower(world, cx, cz); continue; } // bank tower
+      if (cx === -150 && (cz === 90 || cz === 150)) {
+        warehouse(world, cx, cz, pick([0x7a8894, 0x8a7a6a, 0x6a7a8a]));
+        continue;
+      }
+      const downtown = Math.abs(cx) <= 90 && Math.abs(cz) <= 90;
+      if (downtown) {
+        tower(world, cx, cz);
       } else {
-        raiseBlock(world, bx, bz);
+        // Residential: two or three small houses per block, on fixed
+        // corners so no two houses ever overlap each other.
+        const spots = [[-12, -12], [12, 11], [-11, 12]];
+        const n = randInt(2, 3);
+        for (let i = 0; i < n; i++) {
+          house(world, cx + spots[i][0], cz + spots[i][1]);
+        }
       }
     }
   }
 
-  // Marker pins, the spray pad, the beach and the docks.
-  for (const [key, spot] of Object.entries(MARKER_SPOTS)) {
-    markerPin(world, key, spot);
-  }
-  sprayPad(world, MARKER_SPOTS.spray);
-  beachfront(world);
-  docks(world);
-  plantTrees(world);
+  // Mara's garage — low block with a yellow awning over the forecourt.
+  boxMesh(world.scene, 22, 7, 14, std(0x8a7a5a, 0.9), -30, 3.5, -30);
+  addCollider(world, -30, -30, 11, 7);
+  boxMesh(world.scene, 22, 0.6, 6, std(0xe0b93c, 0.8), -30, 6.2, -19);
+  boxMesh(world.scene, 10, 4.5, 0.4, std(0x2e3238, 0.7, 0.3), -30, 2.25, -22.8);
 
-  world.bounds = WORLD.half;
+  // Paint shop — a low workshop on the beachfront row.
+  boxMesh(world.scene, 24, 8, 20, std(0x9a6a8a, 0.9), 85, 4, 140);
+  addCollider(world, 85, 140, 12, 10);
+  boxMesh(world.scene, 24, 0.8, 5, std(0xe0b93c, 0.8), 85, 7.4, 128.5);
+
+  // Hospital — white block with a red cross slab on the roof.
+  boxMesh(world.scene, 30, 14, 22, std(0xe8e8e2, 0.85), -30, 7, 95);
+  addCollider(world, -30, 95, 15, 11);
+  boxMesh(world.scene, 8, 1, 2.5, std(0xc0392b, 0.8), -30, 14.6, 95);
+  boxMesh(world.scene, 2.5, 1, 8, std(0xc0392b, 0.8), -30, 14.6, 95);
+
+  // Hideout — a plain two-storey house on its own block.
+  house(world, -90, 30);
+
+  // Showroom — glass-fronted sales block on the east side.
+  boxMesh(world.scene, 34, 10, 24, std(0x5a7a9a, 0.5, 0.4), 150, 5, 30);
+  addCollider(world, 150, 30, 17, 12);
+  boxMesh(world.scene, 34, 0.8, 4, std(0x2e3238, 0.6, 0.4), 150, 8.5, 16.5);
+
+  // Pay N Spray — an open pad, not a building: a painted slab, a kiosk
+  // at the edge and no collider, so cars drive straight onto it.
+  const pad = new THREE.Mesh(
+    new THREE.PlaneGeometry(26, 22),
+    std(0x4a6a8a, 0.9),
+  );
+  pad.rotation.x = -Math.PI / 2;
+  pad.position.set(150, 0.04, -45);
+  pad.receiveShadow = true;
+  world.scene.add(pad);
+  boxMesh(world.scene, 4, 4, 4, std(0xe0b93c, 0.8), 160, 2, -56);
+  boxMesh(world.scene, 26, 0.5, 1, std(0xe0e0e0, 0.8), 150, 0.1, -56);
+
+  // Dockside containers, stacked two high in places.
+  const containerColors = [0xb04030, 0x3070b0, 0x40a060, 0xc0a030, 0x707880];
+  const spots = [[-165, 60], [-138, 62], [-160, 122], [-135, 125], [-168, 175], [-140, 178]];
+  for (const [x, z] of spots) {
+    shippingContainer(world, x, z, pick(containerColors), Math.random() < 0.5 ? 0 : Math.PI / 2);
+  }
+  shippingContainer(world, -165, 68, pick(containerColors), 0);
+}
+
+function buildHarbor(world) {
+  // Wooden pier reaching out into the sea from the beach.
+  boxMesh(world.scene, 8, 0.5, 38, std(0x8a6a44, 0.95), -60, 0.25, 216);
+  for (const [px, pz] of [[-63, 205], [-57, 205], [-63, 232], [-57, 232]]) {
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 3, 6), std(0x5a4028, 0.95));
+    post.position.set(px, 0.4, pz);
+    world.scene.add(post);
+  }
+
+  // Ferris wheel on the sand: two legs and a spinning rim with cabins.
+  const cx = 45;
+  const cz = 208;
+  const legMat = std(0xdde3e8, 0.6, 0.3);
+  for (const s of [-1, 1]) {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(1.2, 22, 1.2), legMat);
+    leg.position.set(cx + s * 7, 11, cz);
+    leg.rotation.z = s * -0.32;
+    leg.castShadow = true;
+    world.scene.add(leg);
+  }
+  const wheel = new THREE.Group();
+  wheel.position.set(cx, 20, cz);
+  const rim = new THREE.Mesh(
+    new THREE.TorusGeometry(15, 0.7, 8, 40),
+    std(0xe05a6a, 0.5, 0.4),
+  );
+  wheel.add(rim);
+  const hub = new THREE.Mesh(new THREE.CylinderGeometry(1.2, 1.2, 2.5, 10), std(0xeeeeee, 0.5, 0.4));
+  hub.rotation.x = Math.PI / 2;
+  wheel.add(hub);
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2;
+    const spoke = new THREE.Mesh(new THREE.BoxGeometry(0.5, 29, 0.5), std(0xeeeeee, 0.6, 0.3));
+    spoke.position.set(0, 0, 0);
+    spoke.rotation.z = a;
+    wheel.add(spoke);
+    const cabin = new THREE.Mesh(
+      new THREE.BoxGeometry(2.2, 2.2, 2.2),
+      std(pick([0xe05a6a, 0x4a90d9, 0xe0b93c, 0x40a060]), 0.6),
+    );
+    cabin.position.set(Math.sin(a) * 15, Math.cos(a) * 15, 0);
+    wheel.add(cabin);
+  }
+  // Turn the rim to face the beach: the wheel plane is YZ after this.
+  wheel.rotation.y = Math.PI / 2;
+  world.scene.add(wheel);
+  world.ferris = wheel;
+  addCollider(world, cx, cz, 3, 3);
+
+  // A few beach umbrellas for colour.
+  for (const [ux, uz, col] of [[-20, 206, 0xe05a6a], [10, 210, 0x4a90d9], [80, 204, 0xe0b93c]]) {
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 2.4, 6), std(0xeeeeee, 0.7));
+    pole.position.set(ux, 1.2, uz);
+    world.scene.add(pole);
+    const top = new THREE.Mesh(new THREE.ConeGeometry(1.8, 0.9, 10), std(col, 0.8));
+    top.position.set(ux, 2.7, uz);
+    world.scene.add(top);
+  }
+}
+
+function buildTrees(world) {
+  // Trees along sidewalk corners, clear of roads and driveways.
+  let placed = 0;
+  let guard = 0;
+  while (placed < 40 && guard < 300) {
+    guard++;
+    const x = pick(BLOCKS) + rand(-24, 24);
+    const z = pick(BLOCKS) + rand(-24, 24);
+    let onRoad = false;
+    for (const v of GRID_LINES) {
+      if (Math.abs(x - v) < 8 || Math.abs(z - v) < 8) { onRoad = true; break; }
+    }
+    if (onRoad) continue;
+    let inside = false;
+    for (const c of world.colliders) {
+      if (Math.abs(x - c.x) < c.hw + 1 && Math.abs(z - c.z) < c.hd + 1) { inside = true; break; }
+    }
+    if (inside) continue;
+    tree(world, x, z);
+    placed++;
+  }
+}
+
+export function buildCity(world) {
+  buildGround(world);
+  buildRoads(world);
+  buildBlocks(world);
+  buildHarbor(world);
+  buildTrees(world);
+
+  // Navigation markers. Each sits on a road next to its building, so a
+  // car can drive right up to it; the beach marker is on the sand.
+  world.markers = {
+    bank: { x: 30, z: -60 },
+    beach: { x: 0, z: 205 },
+    docks: { x: -180, z: 90 },
+    garage: { x: -30, z: -60 },
+    hideout: { x: -90, z: 60 },
+    hospital: { x: -60, z: 90 },
+    paintShop: { x: 85, z: 120 },
+    showroom: { x: 120, z: 30 },
+    spray: { x: 150, z: -60 },
+    warehouse: { x: -180, z: 150 },
+  };
+  world.roads = { xs: [...GRID_LINES], zs: [...GRID_LINES] };
   return world;
 }

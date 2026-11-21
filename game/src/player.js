@@ -1,279 +1,242 @@
-// Neon Harbor — Cole Vance on foot.
+// Neon Harbor — Cole on foot: walking, looking, jumping, and the
+// third-person camera. Driving is delegated to vehicles.js; this file
+// owns everything about the character himself — his mesh, his health,
+// and keeping him out of the buildings.
 //
-// This module owns the player: his body and mesh, walking and jumping,
-// the third-person camera that follows him (and his car), and taking
-// damage. Driving itself lives in vehicles.js — this file only keeps
-// Cole's position glued to the car while he is in it, because the
-// missions, the police and the HUD all read `player.pos`, so it has to
-// mean "where Cole is" whether he is walking or driving.
-//
-// The camera is a simple orbit rig: the mouse drags the yaw and pitch
-// around Cole, and the camera eases to its spot behind him so it never
-// snaps. While driving it sits behind the car instead, keyed off the
-// car's heading, since that is the direction the player is looking.
-
+// Camera convention: camYaw 0 looks toward +z with the camera behind
+// the player at -z. Forward on the ground is (sin(camYaw), cos(camYaw))
+// and right is (-cos(camYaw), sin(camYaw)).
 import * as THREE from 'three';
 import { clamp, angleLerp, collideCircle } from './state.js';
+import { drivePlayerCar } from './vehicles.js';
 
-const TUNE = {
-  walkSpeed: 5.2,
-  sprintMult: 1.7,
-  jumpVelocity: 7,
-  gravity: 22,
-  camDist: 8,
-  camHeight: 4.5,
-};
+const WALK_SPEED = 5.0;
+const SPRINT_SPEED = 8.5;
+const JUMP_VELOCITY = 7;
+const GRAVITY = 20;
 
-// A limb that swings from a joint: a group at the joint with the box
-// hanging below it, so rotating the group swings the limb.
-function makeLimb(parent, x, y, w, h, d, color) {
-  const joint = new THREE.Group();
-  joint.position.x = x;
-  joint.position.y = y;
-  joint.position.z = 0;
-  const piece = new THREE.Mesh(
-    new THREE.BoxGeometry(w, h, d),
-    new THREE.MeshStandardMaterial({ color, roughness: 0.9 }),
-  );
-  piece.position.y = -h / 2;
-  piece.castShadow = true;
-  joint.add(piece);
-  parent.add(joint);
-  return joint;
-}
-
-function boxPart(parent, w, h, d, color, rough, x, y, z) {
-  const mesh = new THREE.Mesh(
-    new THREE.BoxGeometry(w, h, d),
-    new THREE.MeshStandardMaterial({ color, roughness: rough }),
-  );
-  mesh.position.x = x;
-  mesh.position.y = y;
-  mesh.position.z = z;
-  mesh.castShadow = true;
-  parent.add(mesh);
-  return mesh;
-}
-
-function buildColeMesh() {
-  const group = new THREE.Group();
-  const colors = { skin: 0xd9a986, jacket: 0x2a5a6a, jeans: 0x2a3a4a, hair: 0x2a2018 };
-  const legL = makeLimb(group, -0.14, 0.52, 0.22, 0.52, 0.22, colors.jeans);
-  const legR = makeLimb(group, 0.14, 0.52, 0.22, 0.52, 0.22, colors.jeans);
-  // Torso, head and hair as [w, h, d, color, rough, x, y, z] rows.
-  const boxes = [
-    [0.56, 0.62, 0.32, colors.jacket, 0.85, 0, 0.85, 0],
-    [0.34, 0.36, 0.32, colors.skin, 0.7, 0, 1.36, 0],
-    [0.36, 0.12, 0.34, colors.hair, 0.95, 0, 1.58, -0.02],
-  ];
-  const parts = [];
-  let i = 0;
-  while (i < boxes.length) {
-    const b = boxes[i];
-    parts.push(boxPart(group, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]));
-    i++;
-  }
-  parts[2].castShadow = false;
-  const armL = makeLimb(group, -0.37, 1.12, 0.16, 0.55, 0.16, colors.jacket);
-  const armR = makeLimb(group, 0.37, 1.12, 0.16, 0.55, 0.16, colors.jacket);
-  return { group, legL, legR, armL, armR };
+function limb(material, w, h, d) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
+  m.castShadow = true;
+  return m;
 }
 
 export function createPlayer(game) {
-  const built = buildColeMesh();
-  game.scene.add(built.group);
-  const cole = {};
-  cole.pos = new THREE.Vector3(-60, 0, -34);
-  cole.heading = 0;
-  cole.health = 100;
-  cole.maxHealth = 100;
-  cole.ammo = 12;
-  cole.maxAmmo = 24;
-  cole.weapon = 'fists';
-  cole.car = null;
-  cole.speed = 0;
-  cole.punchAnim = 0;
-  cole.punchCooldown = 0;
-  cole.shootCooldown = 0;
-  cole.invuln = 0;
-  cole.vy = 0;
-  cole.grounded = true;
-  cole.camYaw = 0;
-  cole.camPitch = 0.35;
-  cole.mesh = built.group;
-  cole.legL = built.legL;
-  cole.legR = built.legR;
-  cole.armL = built.armL;
-  cole.armR = built.armR;
-  built.group.position.copy(cole.pos);
-  game.player = cole;
-  return cole;
+  const group = new THREE.Group();
+  const skin = new THREE.MeshStandardMaterial({ color: 0xc98d64, roughness: 0.7 });
+  const shirt = new THREE.MeshStandardMaterial({ color: 0x2e6fb0, roughness: 0.8 });
+  const jacket = new THREE.MeshStandardMaterial({ color: 0x27313d, roughness: 0.85 });
+  const pants = new THREE.MeshStandardMaterial({ color: 0x2b2f36, roughness: 0.85 });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x1a1d24, roughness: 0.6 });
+
+  // Legs hang from hip pivots so the walk cycle can swing them.
+  const legL = new THREE.Group();
+  legL.position.set(-0.14, 0.85, 0);
+  const legLMesh = limb(pants, 0.22, 0.85, 0.24);
+  legLMesh.position.y = -0.42;
+  legL.add(legLMesh);
+  const legR = new THREE.Group();
+  legR.position.set(0.14, 0.85, 0);
+  const legRMesh = limb(pants, 0.22, 0.85, 0.24);
+  legRMesh.position.y = -0.42;
+  legR.add(legRMesh);
+
+  const torso = limb(shirt, 0.62, 0.75, 0.34);
+  torso.position.y = 1.22;
+  const jacketMesh = limb(jacket, 0.66, 0.5, 0.38);
+  jacketMesh.position.y = 1.35;
+
+  const head = limb(skin, 0.34, 0.36, 0.32);
+  head.position.y = 1.8;
+  const hair = limb(dark, 0.36, 0.12, 0.34);
+  hair.position.y = 2.0;
+
+  // Right arm hangs from a shoulder pivot: it swings when walking and
+  // snaps forward for the punch animation.
+  const armL = new THREE.Group();
+  armL.position.set(-0.4, 1.52, 0);
+  const armLMesh = limb(shirt, 0.18, 0.7, 0.2);
+  armLMesh.position.y = -0.32;
+  armL.add(armLMesh);
+  const armR = new THREE.Group();
+  armR.position.set(0.4, 1.52, 0);
+  const armRMesh = limb(shirt, 0.18, 0.7, 0.2);
+  armRMesh.position.y = -0.32;
+  armR.add(armRMesh);
+
+  // Pistol, kept in the right hand and hidden while fists are out.
+  const weaponMesh = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.12, 0.32), dark);
+  weaponMesh.position.set(0, -0.68, 0.12);
+  weaponMesh.visible = false;
+  armR.add(weaponMesh);
+
+  group.add(legL, legR, torso, jacketMesh, head, hair, armL, armR);
+
+  const spawn = game.markers.hideout || { x: 0, z: 0 };
+  group.position.set(spawn.x, 0, spawn.z);
+  game.scene.add(group);
+
+  return {
+    pos: group.position,
+    heading: 0,
+    health: 100,
+    mesh: group,
+    group,
+    weapon: 'fists',
+    weaponMesh,
+    ammo: 12,
+    shootCooldown: 0,
+    punchAnim: 0,
+    camYaw: 0,
+    camPitch: -0.12,
+    vy: 0,
+    grounded: true,
+    speed: 0,
+    invuln: 0,
+    armR,
+    armL,
+    legR,
+    legL,
+    car: null,
+    walkPhase: 0,
+  };
 }
 
-// Where the camera wants to be: behind the target at the given yaw
-// and distance, lifted by the pitch.
-function cameraSpot(target, yaw, dist, lift, pitch) {
-  const cp = Math.cos(pitch);
-  const sp = Math.sin(pitch);
-  const spot = new THREE.Vector3(0, 0, 0);
-  spot.x = target.x - Math.sin(yaw) * cp * dist;
-  spot.y = target.y + sp * dist + lift;
-  spot.z = target.z - Math.cos(yaw) * cp * dist;
-  return spot;
-}
-
-// Put the camera where it belongs this frame: behind Cole on foot,
-// behind the car while driving. It eases in, and snaps when it is a
-// long way off (a teleport or a Continue), so the view never sweeps
-// across the city.
-function moveCamera(game, dt) {
-  const cole = game.player;
+// Third-person camera: behind and above the player, pulled in close
+// when a building would otherwise sit between camera and player, and
+// never left inside a wall after a teleport.
+function positionCamera(game, dt) {
+  const p = game.player;
   const cam = game.camera;
-  const target = new THREE.Vector3(cole.pos.x, cole.pos.y + 1.7, cole.pos.z);
-  let yaw = cole.camYaw;
-  let dist = TUNE.camDist;
-  let lift = 0;
-  if (cole.car) {
-    yaw = cole.car.heading;
-    dist = 10;
-    lift = 1;
-  }
-  const want = cameraSpot(target, yaw, dist, lift, cole.camPitch);
-  // On foot the rig sits about head height above the street; the
-  // numbers above already put it there, but clamp the floor so it
-  // never dips under the pavement.
-  if (want.y < 1.5) want.y = 1.5;
-  const gap = cam.position.distanceTo(want);
-  const k = gap > 25 ? 1 : Math.min(1, dt * 9);
-  cam.position.lerp(want, k);
-  cam.lookAt(target);
-}
-
-function tickTimers(cole, dt) {
-  const timers = ['punchCooldown', 'shootCooldown', 'invuln', 'punchAnim'];
-  for (const key of timers) {
-    if (cole[key] > 0) cole[key] = cole[key] - dt;
-  }
-}
-
-// Camera-relative movement: W runs away from the camera, S toward it,
-// A/D strafe. The camera yaw is the reference, not Cole's heading, so
-// turning the camera turns the controls with it. Each held key adds
-// its direction to the move vector.
-function stepOnFoot(game, cole, dt) {
-  const keys = game.input.keys;
-  const fwdX = Math.sin(cole.camYaw);
-  const fwdZ = Math.cos(cole.camYaw);
-  const rightX = Math.cos(cole.camYaw);
-  const rightZ = -Math.sin(cole.camYaw);
-  const moves = [
-    ['KeyW', fwdX, fwdZ],
-    ['KeyS', -fwdX, -fwdZ],
-    ['KeyD', rightX, rightZ],
-    ['KeyA', -rightX, -rightZ],
-  ];
-  let mx = 0;
-  let mz = 0;
-  for (const [code, dx, dz] of moves) {
-    if (keys.has(code)) {
-      mx = mx + dx;
-      mz = mz + dz;
+  if (!cam) return;
+  const dist = p.car ? 9.5 : 7.5;
+  const height = p.car ? 3.6 : 3.0;
+  const cy = p.camYaw;
+  const cp = p.camPitch;
+  const ox = -Math.sin(cy) * Math.cos(cp) * dist;
+  const oz = -Math.cos(cy) * Math.cos(cp) * dist;
+  const oy = height + Math.sin(cp) * dist;
+  let cx = p.pos.x + ox;
+  let cz = p.pos.z + oz;
+  let cyPos = p.pos.y + oy;
+  const res = collideCircle(game, cx, cz, 0.4);
+  if (res.hit) {
+    // A wall is in the way: pull the camera most of the way in.
+    cx = p.pos.x + ox * 0.4;
+    cz = p.pos.z + oz * 0.4;
+    cyPos = p.pos.y + oy * 0.55;
+    const res2 = collideCircle(game, cx, cz, 0.4);
+    if (res2.hit) {
+      cx = p.pos.x + ox * 0.15;
+      cz = p.pos.z + oz * 0.15;
+      cyPos = p.pos.y + 2.2;
     }
   }
-  const moving = mx !== 0 || mz !== 0;
-  let pace = 0;
-  if (moving) {
-    const len = Math.hypot(mx, mz);
-    mx = mx / len;
-    mz = mz / len;
-    const sprint = keys.has('ShiftLeft') || keys.has('ShiftRight');
-    pace = TUNE.walkSpeed * (sprint ? TUNE.sprintMult : 1);
-    const nx = cole.pos.x + mx * pace * dt;
-    const nz = cole.pos.z + mz * pace * dt;
-    const moved = collideCircle(game, nx, nz, 0.55);
-    cole.pos.x = moved.x;
-    cole.pos.z = moved.z;
-    cole.heading = angleLerp(cole.heading, Math.atan2(mx, mz), Math.min(1, dt * 12));
-  }
-  // Jump and gravity. Space is the handbrake while driving, so it only
-  // jumps here, on foot.
-  if (keys.has('Space') && cole.grounded) {
-    cole.vy = TUNE.jumpVelocity;
-    cole.grounded = false;
-  }
-  if (!cole.grounded) {
-    cole.vy = cole.vy - TUNE.gravity * dt;
-    cole.pos.y = cole.pos.y + cole.vy * dt;
-    if (cole.pos.y <= 0) {
-      cole.pos.y = 0;
-      cole.vy = 0;
-      cole.grounded = true;
-    }
-  }
-  cole.speed = pace;
-  return moving;
-}
-
-// Animate the body: legs swing with the stride, the right arm swings
-// the punch while a punch is playing, otherwise it swings with the
-// stride too.
-function animateCole(game, cole, moving) {
-  const stride = moving ? game.time * 11 : 0;
-  const swing = moving ? Math.sin(stride) * 0.55 : 0;
-  cole.legL.rotation.x = swing;
-  cole.legR.rotation.x = -swing;
-  cole.armL.rotation.x = -swing * 0.7;
-  if (cole.punchAnim > 0) {
-    // A punch lasts 0.22 s (the combat module's window): the arm swings
-    // out and back in that time.
-    const p = (0.22 - cole.punchAnim) / 0.22;
-    cole.armR.rotation.x = -Math.sin(p * Math.PI) * 1.5;
-  } else {
-    cole.armR.rotation.x = swing * 0.7;
-  }
-  cole.mesh.position.copy(cole.pos);
-  cole.mesh.rotation.y = cole.heading;
+  cam.position.set(cx, Math.max(cyPos, 1.2), cz);
+  cam.lookAt(p.pos.x, p.pos.y + 1.6, p.pos.z);
 }
 
 export function updatePlayer(game, dt) {
-  const cole = game.player;
-  tickTimers(cole, dt);
-  // The mouse orbits the camera. Consume the deltas here so they apply
-  // exactly once per frame.
-  cole.camYaw = cole.camYaw - game.input.mouseDX * 0.0035;
-  const nextPitch = cole.camPitch + game.input.mouseDY * 0.0022;
-  cole.camPitch = clamp(nextPitch, 0.06, 1.05);
+  const p = game.player;
+  if (!p) return;
+
+  // Mouse look first: the deltas are consumed here, once per frame.
+  p.camYaw -= game.input.mouseDX * 0.0032;
+  p.camPitch = clamp(p.camPitch - game.input.mouseDY * 0.0032, -0.9, 0.6);
   game.input.mouseDX = 0;
   game.input.mouseDY = 0;
-  if (cole.car) {
-    // Driving: Cole rides with the car. His position tracks it, the mesh
-    // hides inside the car, and the camera trails the car.
-    cole.pos.copy(cole.car.pos);
-    cole.pos.y = 0;
-    cole.heading = cole.car.heading;
-    cole.mesh.visible = false;
-    cole.speed = Math.abs(cole.car.speed);
-    moveCamera(game, dt);
+
+  p.shootCooldown = Math.max(0, p.shootCooldown - dt);
+  p.punchAnim = Math.max(0, p.punchAnim - dt * 3.2);
+  p.invuln = Math.max(0, p.invuln - dt);
+
+  if (p.car) {
+    // While driving the camera drifts behind the car unless the
+    // player is actively looking around with the mouse.
+    drivePlayerCar(game, dt);
+    p.camYaw = angleLerp(p.camYaw, p.car.heading, dt * 1.2);
+    p.heading = p.car.heading;
+    positionCamera(game, dt);
     return;
   }
-  cole.mesh.visible = true;
-  const moving = stepOnFoot(game, cole, dt);
-  animateCole(game, cole, moving);
-  moveCamera(game, dt);
+
+  const keys = game.input.keys;
+  let mz = 0;
+  let mx = 0;
+  if (keys.has('KeyW')) mz += 1;
+  if (keys.has('KeyS')) mz -= 1;
+  if (keys.has('KeyA')) mx -= 1;
+  if (keys.has('KeyD')) mx += 1;
+
+  const sprint = keys.has('ShiftLeft') || keys.has('ShiftRight');
+  const speed = sprint ? SPRINT_SPEED : WALK_SPEED;
+  const moving = mz !== 0 || mx !== 0;
+  let vx = 0;
+  let vz = 0;
+  if (moving) {
+    const fx = Math.sin(p.camYaw);
+    const fz = Math.cos(p.camYaw);
+    const rx = -Math.cos(p.camYaw);
+    const rz = Math.sin(p.camYaw);
+    vx = fx * mz + rx * mx;
+    vz = fz * mz + rz * mx;
+    const len = Math.hypot(vx, vz) || 1;
+    vx /= len;
+    vz /= len;
+    p.heading = Math.atan2(vx, vz);
+    p.walkPhase += dt * (sprint ? 13 : 9);
+    const swing = Math.sin(p.walkPhase) * 0.55;
+    p.legL.rotation.x = swing;
+    p.legR.rotation.x = -swing;
+    p.armL.rotation.x = -swing * 0.7;
+    p.armR.rotation.x = p.punchAnim > 0 ? -1.5 * p.punchAnim : swing * 0.7;
+    p.speed = speed;
+  } else {
+    p.legL.rotation.x *= 0.8;
+    p.legR.rotation.x *= 0.8;
+    p.armL.rotation.x *= 0.8;
+    if (p.punchAnim <= 0) p.armR.rotation.x *= 0.8;
+    else p.armR.rotation.x = -1.5 * p.punchAnim;
+    p.speed = 0;
+  }
+
+  // Jump and gravity.
+  if (keys.has('Space') && p.grounded) {
+    p.vy = JUMP_VELOCITY;
+    p.grounded = false;
+  }
+  if (!p.grounded) {
+    p.vy -= GRAVITY * dt;
+    p.pos.y += p.vy * dt;
+    if (p.pos.y <= 0) {
+      p.pos.y = 0;
+      p.vy = 0;
+      p.grounded = true;
+    }
+  }
+
+  const nx = p.pos.x + vx * speed * dt;
+  const nz = p.pos.z + vz * speed * dt;
+  const res = collideCircle(game, nx, nz, 0.6);
+  p.pos.x = clamp(res.x, -238, 238);
+  p.pos.z = clamp(res.z, -238, 238);
+
+  p.mesh.position.set(p.pos.x, p.pos.y, p.pos.z);
+  p.mesh.rotation.y = p.heading;
+  positionCamera(game, dt);
 }
 
-// Hurt Cole. A short grace window keeps a single scrape from landing
-// twice, but the test hook ('test') always goes through. At zero health
-// the wasted flow takes over.
+// A hit on Cole: brief invulnerability so one burst cannot stack, a
+// red spark for feedback, and the health total back to the caller.
 export function damagePlayer(game, amount, cause) {
-  const cole = game.player;
-  const open = cole && game.mode === 'playing' && cole.health > 0;
-  const grace = cause !== 'test' && cole && cole.invuln > 0;
-  if (!open || grace) return;
-  cole.health = Math.max(0, cole.health - amount);
-  cole.invuln = 0.5;
-  if (game.hud) game.hud.flashDamage();
-  if (cole.health <= 0) {
-    game.missions.onWasted(game);
+  const p = game.player;
+  if (!p || p.health <= 0) return p ? p.health : 0;
+  if (p.invuln > 0) return p.health;
+  p.health = Math.max(0, p.health - amount);
+  p.invuln = 0.6;
+  if (game.fx) {
+    game.fx.burst(new THREE.Vector3(p.pos.x, p.pos.y + 1.2, p.pos.z), 0xff4444, 6, 3, 0.15);
   }
+  if (game.audio) game.audio.tone(160, 0.18, 'sawtooth', 0.15, 0, -70);
+  return p.health;
 }

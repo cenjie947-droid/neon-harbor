@@ -1,55 +1,12 @@
-// Neon Harbor — sparks, smoke, muzzle flashes and camera shake.
+// Neon Harbor — particles and camera shake.
 //
-// Everything here is a short-lived mesh: a burst throws a handful of
-// coloured chips out from a point, a smoke puff rises and swells, a
-// tracer is a bright bar that lives for a blink, and an explosion is
-// a burst plus smoke plus a shake. Particles carry their own velocity
-// and lifetime and are cleaned up when they die, so the scene never
-// fills with dead meshes. The list of live particles is public on
-// purpose — the tests count smoke through it.
-
+// Every transient visual lives here: sparks and smoke from crashes,
+// muzzle flashes and tracers from gunfire, explosions, and the
+// screen shake that sells an impact. Particles are plain meshes
+// tracked in `particles` with a velocity, a remaining life and a
+// fade; `update` steps them all and retires the dead ones.
 import * as THREE from 'three';
-
-const CHIP = new THREE.BoxGeometry(0.16, 0.16, 0.16);
-const PUFF = new THREE.SphereGeometry(0.5, 8, 6);
-
-// A random launch direction for one burst chip: flat in a random
-// compass direction, with an upward bias.
-function randomLaunch(speed) {
-  const a = Math.random() * Math.PI * 2;
-  const up = Math.random() * 0.7 + 0.3;
-  const vel = new THREE.Vector3(0, 0, 0);
-  vel.x = Math.cos(a) * speed;
-  vel.y = up * speed;
-  vel.z = Math.sin(a) * speed;
-  return vel;
-}
-
-// A slow random drift for one smoke puff: mostly upward, a little
-// sideways.
-function randomDrift() {
-  const vel = new THREE.Vector3(0, 0, 0);
-  vel.x = (Math.random() - 0.5) * 0.4;
-  vel.y = 1.1 + Math.random() * 0.5;
-  vel.z = (Math.random() - 0.5) * 0.4;
-  return vel;
-}
-
-// One particle record. `rise` makes it float up instead of falling,
-// `grow` swells it as it ages.
-function newParticle(mesh, vel, life, opts) {
-  const o = opts || {};
-  return {
-    mesh,
-    vel: vel.clone(),
-    life,
-    maxLife: life,
-    gravity: o.rise ? 1.5 : -9,
-    grow: o.grow || 0,
-    baseScale: o.baseScale || 1,
-    fade: o.fade !== false,
-  };
-}
+import { rand } from './state.js';
 
 export class Effects {
   constructor(game) {
@@ -58,116 +15,137 @@ export class Effects {
     this.trauma = 0;
   }
 
-  // Add one particle to the scene and the live list.
-  add(mesh, vel, life, opts) {
-    const o = opts || {};
-    mesh.position.copy(o.at || new THREE.Vector3());
+  // Track a mesh as a particle. `opts.at` sets where it starts;
+  // otherwise the mesh's current position is used.
+  add(mesh, vel, life, opts = {}) {
+    if (opts.at) mesh.position.copy(opts.at);
     this.game.scene.add(mesh);
-    this.particles.push(newParticle(mesh, vel, life, o));
-    return mesh;
+    const mat = mesh.material;
+    const p = {
+      mesh,
+      vel: vel ? vel.clone() : new THREE.Vector3(),
+      life,
+      maxLife: life,
+      gravity: opts.gravity ?? 0,
+      fade: opts.fade ?? true,
+      grow: opts.grow ?? 0,
+      spin: opts.spin ?? 0,
+      baseScale: opts.size ?? 1,
+      baseOpacity: mat && mat.transparent ? (mat.opacity ?? 1) : 1,
+    };
+    if (mat) mat.transparent = true;
+    this.particles.push(p);
+    return p;
   }
 
-  // A spray of coloured chips: crash debris, hit sparks, punch stars.
-  // `speed` is the launch speed, `size` scales the chips.
-  burst(at, color, count, speed, size) {
-    const launch = speed === undefined ? 3 : speed;
-    const scale = size === undefined ? 1 : size;
+  // A spray of small bright boxes, e.g. impact sparks or a punch hit.
+  burst(at, color, count = 10, speed = 6, size = 0.18) {
     for (let i = 0; i < count; i++) {
-      const material = new THREE.MeshBasicMaterial({ color, transparent: true });
-      const mesh = new THREE.Mesh(CHIP, material);
-      const s = scale * (0.7 + Math.random() * 0.6);
-      mesh.scale.setScalar(s);
-      const vel = randomLaunch(launch);
-      const life = 0.45 + Math.random() * 0.4;
-      this.add(mesh, vel, life, { at, baseScale: mesh.scale.x });
+      const m = new THREE.Mesh(
+        new THREE.BoxGeometry(size, size, size),
+        new THREE.MeshBasicMaterial({ color, transparent: true }),
+      );
+      const a = Math.random() * Math.PI * 2;
+      const vel = new THREE.Vector3(
+        Math.cos(a) * speed * rand(0.4, 1),
+        rand(-0.5, 1) * speed,
+        Math.sin(a) * speed * rand(0.4, 1),
+      );
+      this.add(m, vel, rand(0.4, 0.9), { at, gravity: 12 });
     }
   }
 
-  // A grey puff from a damaged hood: rises, swells, hangs for a while.
+  // One slow grey puff that rises, swells and fades — car smoke.
   smokePuff(at) {
-    const material = new THREE.MeshBasicMaterial({ color: 0x777777, transparent: true, opacity: 0.55 });
-    const mesh = new THREE.Mesh(PUFF, material);
-    mesh.scale.setScalar(0.6);
-    this.add(mesh, randomDrift(), 1.4, { at, rise: true, grow: 1.6, baseScale: 0.6 });
+    const m = new THREE.Mesh(
+      new THREE.SphereGeometry(rand(0.35, 0.55), 8, 6),
+      new THREE.MeshBasicMaterial({ color: 0x666666, transparent: true, opacity: 0.55 }),
+    );
+    this.add(
+      m,
+      new THREE.Vector3(rand(-0.3, 0.3), rand(1.2, 2.0), rand(-0.3, 0.3)),
+      rand(0.9, 1.4),
+      { at, gravity: -1.5, grow: 0.8 },
+    );
   }
 
-  // A big one: orange fire, grey smoke, and a shake.
   explosion(at) {
-    this.burst(at, 0xff7722, 18, 7, 1.4);
-    this.burst(at, 0xffcc66, 10, 4, 1);
+    this.burst(at, 0xff7b24, 22, 9, 0.3);
+    this.burst(at, 0xffd21f, 12, 6, 0.22);
     for (let i = 0; i < 4; i++) {
-      const p = at.clone();
-      p.x += (Math.random() - 0.5) * 1.5;
-      p.z += (Math.random() - 0.5) * 1.5;
-      this.smokePuff(p);
+      this.smokePuff(new THREE.Vector3(at.x + rand(-1, 1), at.y + rand(0, 1), at.z + rand(-1, 1)));
     }
-    this.shake(0.55);
+    this.shake(0.7);
   }
 
-  // The flash at a gun's muzzle: a bright chip and a couple of sparks.
+  // A flash at the barrel plus a tracer downrange.
   muzzle(origin, dir) {
-    const at = origin.clone().addScaledVector(dir, 0.8);
-    if (at.y < 0.4) at.y = 0.4;
-    this.burst(at, 0xffdd66, 4, 3, 0.8);
+    const m = new THREE.Mesh(
+      new THREE.SphereGeometry(0.16, 8, 6),
+      new THREE.MeshBasicMaterial({ color: 0xffe9a8, transparent: true }),
+    );
+    this.add(m, dir.clone().multiplyScalar(2), 0.08, { at: origin, fade: true });
+    this.tracer(origin, origin.clone().add(dir.clone().multiplyScalar(18)));
   }
 
-  // A bright bar from a gun to where the shot landed, gone in a blink.
   tracer(from, to) {
     const len = from.distanceTo(to);
-    if (len < 0.5) return;
-    const material = new THREE.MeshBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0.9 });
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, len), material);
-    mesh.position.copy(from).lerp(to, 0.5);
-    mesh.lookAt(to);
-    this.add(mesh, new THREE.Vector3(), 0.09, { at: mesh.position, fade: true });
+    const m = new THREE.Mesh(
+      new THREE.BoxGeometry(0.05, 0.05, Math.max(len, 0.1)),
+      new THREE.MeshBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0.9 }),
+    );
+    m.position.copy(from).add(to).multiplyScalar(0.5);
+    m.lookAt(to);
+    this.add(m, new THREE.Vector3(), 0.09, { at: m.position });
   }
 
-  // Add a jolt. The trauma stacks up to 1 and bleeds off over a second.
   shake(amount) {
     this.trauma = Math.min(1, this.trauma + amount);
   }
 
-  // Camera shake: a random offset that scales with the square of the
-  // trauma, so small bumps barely register and big hits lurch.
+  // Jitter the camera by the current trauma, then let it decay. The
+  // camera position is rebuilt every frame by the player update, so
+  // this only ever adds a one-frame offset.
   applyShake(dt) {
-    if (this.trauma <= 0) return;
+    if (this.trauma <= 0.001 || !this.game.camera) return;
+    const s = this.trauma * this.trauma * 0.5;
+    this.game.camera.position.x += rand(-s, s);
+    this.game.camera.position.y += rand(-s, s);
     this.trauma = Math.max(0, this.trauma - dt * 1.4);
-    const s = this.trauma * this.trauma * 0.55;
-    const cam = this.game.camera;
-    if (!cam) return;
-    cam.position.x += (Math.random() - 0.5) * s;
-    cam.position.y += (Math.random() - 0.5) * s * 0.6;
   }
 
-  // Pull a dead particle out of the scene and the list.
   retire(i) {
     const p = this.particles[i];
+    if (!p) return;
     this.game.scene.remove(p.mesh);
+    if (p.mesh.geometry) p.mesh.geometry.dispose();
     if (p.mesh.material) p.mesh.material.dispose();
     this.particles.splice(i, 1);
   }
 
-  // Age one particle by a frame. Returns false when it just died.
   stepParticle(p, dt) {
     p.life -= dt;
-    if (p.life <= 0) return false;
-    p.vel.y += p.gravity * dt;
     p.mesh.position.addScaledVector(p.vel, dt);
-    if (p.mesh.position.y < 0.05) {
-      p.mesh.position.y = 0.05;
-      p.vel.y = Math.abs(p.vel.y) * 0.3;
+    p.vel.y -= p.gravity * dt;
+    if (p.grow) {
+      const s = p.baseScale + p.grow * (p.maxLife - p.life);
+      p.mesh.scale.setScalar(Math.max(0.05, s));
     }
-    const age = 1 - p.life / p.maxLife;
-    if (p.grow) p.mesh.scale.setScalar(p.baseScale * (1 + age * p.grow));
-    if (p.fade) p.mesh.material.opacity = Math.max(0, p.life / p.maxLife);
-    return true;
+    if (p.spin) {
+      p.mesh.rotation.x += p.spin * dt;
+      p.mesh.rotation.y += p.spin * dt * 0.7;
+    }
+    if (p.fade && p.mesh.material) {
+      const f = Math.max(0, p.life / p.maxLife);
+      p.mesh.material.opacity = p.baseOpacity * f;
+    }
   }
 
   update(dt) {
-    this.applyShake(dt);
     for (let i = this.particles.length - 1; i >= 0; i--) {
-      const alive = this.stepParticle(this.particles[i], dt);
-      if (!alive) this.retire(i);
+      this.stepParticle(this.particles[i], dt);
+      if (this.particles[i].life <= 0) this.retire(i);
     }
+    this.applyShake(dt);
   }
 }
