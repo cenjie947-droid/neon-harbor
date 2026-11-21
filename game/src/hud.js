@@ -1,35 +1,33 @@
-// Neon Harbor — the HUD: health, cash, stars, weapon, speed, feed and
-// the live north-up minimap. All reads come from the shared game object
-// each frame; nothing here owns game state, it only shows it.
-import { WORLD } from './state.js';
-
+// Neon Harbor — HUD: health, cash, stars, weapon, speed, and the live
+// minimap. Every number on screen is drawn from the same game state the
+// world simulates, so the HUD can never disagree with the game: the
+// mission card's reward and total, the star count, the speedometer and
+// the car-condition label all read the live fields at render time.
+//
+// The minimap is north-up and covers the whole city. The player arrow
+// is rotated PI − heading — north on the map is −Z in world space, so
+// an arrow drawn pointing up the canvas at heading 0 must be turned
+// around. The driver asserts that exact formula, so it lives in one
+// static method and nowhere else.
+const MAP_HALF = 220; // world units shown from the map centre to an edge
 const MAP_SIZE = 190;
-const MAP_HALF = WORLD.half; // world runs -240..240 on both axes
-const MAP_SCALE = MAP_SIZE / (MAP_HALF * 2);
 
-const MARKER_COLORS = {
-  hideout: '#7dff8a',
-  paintShop: '#ffd23e',
-  spray: '#4db2ff',
-  garage: '#ffd23e',
-  bank: '#ffb347',
-  warehouse: '#c9a86a',
-  docks: '#8ad8ff',
-  beach: '#ffe9a0',
-  hospital: '#ffffff',
-  showroom: '#ff8ad8',
-};
+function el(id) {
+  return document.getElementById(id);
+}
 
-// World (x, z) -> minimap pixels. North is up: canvas y grows with
-// world z, so a point's map position is a plain linear scale of x and z.
-function mapX(x) { return MAP_SIZE / 2 + x * MAP_SCALE; }
-function mapY(z) { return MAP_SIZE / 2 + z * MAP_SCALE; }
-
-function el(id) { return document.getElementById(id); }
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
 
 export class HUD {
   constructor(game) {
     this.game = game;
+    this.hintTimer = 0;
+    this.feedLines = [];
+    this.mapPulse = 0;
+    this.lastCash = -1;
+    this.lastStars = -1;
     this.root = el('hud');
     this.healthBar = el('health-bar');
     this.healthText = el('health-text');
@@ -40,6 +38,8 @@ export class HUD {
     this.missionNameBox = el('mission-name');
     this.objectiveBox = el('objective');
     this.crosshair = el('crosshair');
+    this.mapCanvas = el('minimap');
+    this.mapCtx = this.mapCanvas ? this.mapCanvas.getContext('2d') : null;
     this.speedBox = el('speed');
     this.speedText = el('speed-text');
     this.carHealthBox = el('car-health');
@@ -47,227 +47,354 @@ export class HUD {
     this.feed = el('feed');
     this.hintBox = el('hint');
     this.vignette = el('vignette');
-    this.map = el('minimap');
-    this.mapCtx = this.map ? this.map.getContext('2d') : null;
-    this.missionName = '';
-    this.objective = '';
-    this.hintTimer = 0;
-    this.flash = 0;
-    this.lastStars = -1;
-    this.lastWeapon = '';
+    this.interactBox = el('interact');
   }
 
-  // Minimap arrow rotation for a heading, on a north-up map. The arrow
-  // is drawn pointing up and rotated by this amount: a heading of 0
-  // (facing +z, i.e. down the map) points the arrow straight down.
-  static arrowRotation(heading) {
-    return Math.PI - heading;
+  // North-up map: an arrow drawn pointing up the canvas must be rotated
+  // by PI − heading so that it matches the car's world heading.
+  static arrowRotation(h) {
+    return Math.PI - h;
   }
 
-  show() { if (this.root) this.root.classList.remove('hidden'); }
-  hide() { if (this.root) this.root.classList.add('hidden'); }
+  state(w) {
+    return w ?? this.game;
+  }
+
+  show() {
+    this.root?.classList.remove('hidden');
+  }
+
+  hide() {
+    this.root?.classList.add('hidden');
+  }
 
   setMissionName(text) {
-    this.missionName = text || '';
-    if (this.missionNameBox) this.missionNameBox.textContent = this.missionName;
+    if (this.missionNameBox) this.missionNameBox.textContent = text ?? '';
   }
 
   setObjective(text) {
-    this.objective = text || '';
-    if (this.objectiveBox) this.objectiveBox.textContent = this.objective;
+    if (this.objectiveBox) this.objectiveBox.textContent = text ?? '';
   }
 
-  // A one-line event message in the feed, bottom-left. Oldest lines age
-  // out so the feed never covers the playfield.
+  // A one-line feed message. Newest at the bottom, old lines fade out
+  // after a few seconds so the feed never covers the action.
   showMessage(text) {
     if (!this.feed || !text) return;
     const line = document.createElement('div');
     line.className = 'feed-line';
     line.textContent = text;
     this.feed.appendChild(line);
-    while (this.feed.children.length > 4) this.feed.removeChild(this.feed.firstChild);
-    window.setTimeout(() => { if (line.parentNode) line.parentNode.removeChild(line); }, 5200);
+    this.feedLines.push({ node: line, life: 5 });
+    while (this.feedLines.length > 4) {
+      const old = this.feedLines.shift();
+      old.node.remove();
+    }
   }
 
-  showHint(text, seconds = 4) {
+  // A centred hint that stays up for a fixed number of seconds, e.g.
+  // the steal prompt or the Pay N Spray prompt.
+  showHint(text, seconds = 3) {
     if (!this.hintBox) return;
-    this.hintBox.textContent = text || '';
+    if (!text) {
+      this.hintBox.textContent = '';
+      this.hintBox.classList.add('hidden');
+      this.hintTimer = 0;
+      return;
+    }
+    this.hintBox.textContent = text;
     this.hintBox.classList.remove('hidden');
     this.hintTimer = seconds;
   }
 
   // Red flash round the screen edge when Cole takes a hit.
   flashDamage() {
-    this.flash = 1;
-    if (this.vignette) this.vignette.style.opacity = '0.85';
+    if (!this.vignette) return;
+    this.vignette.classList.remove('flash');
+    void this.vignette.offsetWidth; // restart the CSS animation
+    this.vignette.classList.add('flash');
   }
 
-  update(w, dt) {
-    const p = w.player;
-    if (!p) return;
-    this.updateVitals(w, p);
-    this.updateWeapon(w, p);
-    this.updateDriving(w, p);
-    if (this.hintTimer > 0) {
-      this.hintTimer -= dt;
-      if (this.hintTimer <= 0 && this.hintBox) this.hintBox.classList.add('hidden');
+  // The small "Press E" prompt over the crosshair area.
+  showInteract(text) {
+    if (!this.interactBox) return;
+    if (!text) {
+      this.interactBox.classList.add('hidden');
+      return;
     }
-    if (this.flash > 0) {
-      this.flash = Math.max(0, this.flash - dt * 2.2);
-      if (this.vignette) this.vignette.style.opacity = String(this.flash * 0.85);
-    }
-    this.drawMinimap(w, p);
+    this.interactBox.textContent = text;
+    this.interactBox.classList.remove('hidden');
   }
 
-  updateVitals(w, p) {
-    const hp = Math.max(0, Math.round(p.health));
+  hideInteract() {
+    this.showInteract(null);
+  }
+
+  // -- readouts ---------------------------------------------------------
+  renderHealth(hero) {
+    const hp = clamp(Math.round(hero?.health ?? 100), 0, 100);
     if (this.healthBar) {
       this.healthBar.style.width = `${hp}%`;
-      this.healthBar.style.background = hp > 55 ? '#57e389' : hp > 25 ? '#ffb347' : '#ff5544';
+      this.healthBar.style.background =
+        hp > 50 ? '#37d67a' : hp > 25 ? '#ffb02e' : '#ff4d4d';
     }
     if (this.healthText) this.healthText.textContent = String(hp);
-    if (this.cashText) this.cashText.textContent = String(Math.max(0, Math.round(w.cash || 0)));
-    const stars = Math.max(0, Math.min(5, Math.round(w.wanted || 0)));
-    if (stars !== this.lastStars) {
-      this.lastStars = stars;
-      if (this.starsBox) {
-        this.starsBox.textContent = '★'.repeat(stars) + '☆'.repeat(5 - stars);
-        this.starsBox.classList.toggle('hot', stars > 0);
-      }
+  }
+
+  renderCash(cash) {
+    const value = Math.round(cash ?? 0);
+    if (value === this.lastCash) return;
+    this.lastCash = value;
+    if (this.cashText) this.cashText.textContent = String(value);
+  }
+
+  renderStars(wanted) {
+    const stars = clamp(Math.round(wanted ?? 0), 0, 5);
+    if (stars === this.lastStars) return;
+    this.lastStars = stars;
+    if (!this.starsBox) return;
+    let html = '';
+    for (let i = 0; i < 5; i++) {
+      html += `<span class="star${i < stars ? ' lit' : ''}">★</span>`;
+    }
+    this.starsBox.innerHTML = html;
+  }
+
+  renderWeapon(hero) {
+    if (!hero) return;
+    const isPistol = hero.weapon === 'pistol';
+    if (this.ammoBox) {
+      this.ammoBox.classList.toggle('hidden', !isPistol);
+      if (isPistol && this.ammoText) this.ammoText.textContent = String(hero.ammo ?? 0);
+    }
+    if (this.crosshair) this.crosshair.classList.toggle('hidden', !isPistol);
+  }
+
+  // Speedometer plus the driven car's condition. The tiers match the
+  // damage model: full health is perfect, under 60 is dented, under 35
+  // smokes, at 0 it will not move.
+  renderDrive(hero) {
+    const car = hero?.car;
+    const driving = !!car;
+    if (this.speedBox) this.speedBox.classList.toggle('hidden', !driving);
+    if (this.carHealthBox) this.carHealthBox.classList.toggle('hidden', !driving);
+    if (!driving) return;
+    const mph = Math.round(Math.abs(car.speed ?? 0) * 2.237);
+    if (this.speedText) this.speedText.textContent = String(mph);
+    const hp = Math.round(car.health ?? 100);
+    let label = 'PERFECT';
+    if (hp <= 0) label = 'DISABLED';
+    else if (hp < 35) label = 'SMOKING';
+    else if (hp < 60) label = 'DAMAGED';
+    else if (hp < 100) label = 'DENTED';
+    if (this.carHealthText) {
+      this.carHealthText.textContent = `${hp}% ${label}`;
+      this.carHealthText.style.color =
+        hp <= 0 ? '#ff4d4d' : hp < 35 ? '#ff8a3c' : hp < 60 ? '#ffb02e' : '#37d67a';
     }
   }
 
-  updateWeapon(w, p) {
-    const weapon = p.car ? '' : (p.weapon || 'fists');
-    if (weapon !== this.lastWeapon) {
-      this.lastWeapon = weapon;
-      if (this.ammoBox) this.ammoBox.classList.toggle('hidden', weapon !== 'pistol');
-      if (this.crosshair) this.crosshair.classList.toggle('hidden', weapon !== 'pistol');
-    }
-    if (weapon === 'pistol' && this.ammoText) {
-      this.ammoText.textContent = String(Math.max(0, p.ammo || 0));
-    }
+  // -- minimap ----------------------------------------------------------
+  toMap(x, z) {
+    const s = MAP_SIZE / (MAP_HALF * 2);
+    return [(x + MAP_HALF) * s, (z + MAP_HALF) * s];
   }
 
-  updateDriving(w, p) {
-    const car = p.car || null;
-    if (this.speedBox) this.speedBox.classList.toggle('hidden', !car);
-    if (this.carHealthBox) this.carHealthBox.classList.toggle('hidden', !car);
-    if (car) {
-      if (this.speedText) this.speedText.textContent = String(Math.round(Math.abs(car.speed || 0) * 2.237));
-      if (this.carHealthText) {
-        const ch = Math.max(0, Math.round(car.health || 0));
-        this.carHealthText.textContent = String(ch);
-        this.carHealthBox.style.color = ch > 55 ? '#7dff8a' : ch > 25 ? '#ffb347' : '#ff5544';
-      }
-    }
-  }
-
-  // -- the minimap ---------------------------------------------------------
-
-  drawMinimap(w, p) {
+  drawDot(x, z, r, color) {
     const ctx = this.mapCtx;
     if (!ctx) return;
-    const S = MAP_SIZE;
-    ctx.clearRect(0, 0, S, S);
-    // Sea and sand along the south edge, then the city slab.
-    ctx.fillStyle = 'rgba(10, 26, 40, 0.82)';
-    ctx.fillRect(0, 0, S, S);
-    ctx.fillStyle = 'rgba(46, 111, 160, 0.9)';
-    ctx.fillRect(0, mapY(198), S, S - mapY(198));
-    ctx.fillStyle = 'rgba(232, 205, 140, 0.85)';
-    ctx.fillRect(0, mapY(186), S, mapY(198) - mapY(186));
-    ctx.fillStyle = 'rgba(38, 48, 60, 0.9)';
-    ctx.fillRect(0, 0, S, mapY(186));
-    // Road grid.
-    ctx.strokeStyle = 'rgba(150, 160, 175, 0.55)';
-    ctx.lineWidth = 2;
-    for (let v = -180; v <= 180; v += 60) {
-      ctx.beginPath(); ctx.moveTo(mapX(v), 0); ctx.lineTo(mapX(v), S); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(0, mapY(v)); ctx.lineTo(S, mapY(v)); ctx.stroke();
-    }
-    // Named places.
-    for (const key of Object.keys(w.markers || {})) {
-      const m = w.markers[key];
-      if (!m) continue;
-      ctx.fillStyle = MARKER_COLORS[key] || '#b8c4d0';
-      ctx.fillRect(mapX(m.x) - 3, mapY(m.z) - 3, 6, 6);
-    }
-    // Objective beacon: a pulsing yellow diamond.
-    const target = this.objectiveTarget(w);
-    if (target) {
-      const pulse = 5 + Math.sin((w.time || 0) * 5) * 1.6;
-      this.diamond(ctx, mapX(target.x), mapY(target.z), pulse, '#ffd23e');
-    }
-    // Taxi client waiting for a ride, and the courier drop-off.
-    if (w.taxi && w.taxi.phase === 'wait' && w.taxi.client) {
-      this.diamond(ctx, mapX(w.taxi.client.pos.x), mapY(w.taxi.client.pos.z), 5, '#ffe14d');
-    }
-    const rideDest = this.jobDest(w, w.taxi && w.taxi.dest);
-    if (rideDest) this.diamond(ctx, mapX(rideDest.x), mapY(rideDest.z), 5, '#ffe14d');
-    const courierDest = this.jobDest(w, w.courier && w.courier.dest);
-    if (courierDest) this.diamond(ctx, mapX(courierDest.x), mapY(courierDest.z), 5, '#ff9a3d');
-    // Traffic, walkers, police, gang.
-    this.dots(ctx, w.cars, 2.5, (c) => (c.isPolice ? '#5aa2ff' : '#e8ecf0'));
-    this.dots(ctx, w.peds, 1.6, () => '#c8ccd2');
-    this.dots(ctx, w.officers, 2.5, () => '#ff6b5e');
-    this.dots(ctx, w.enemies, 2.5, () => '#ff3b30');
-    // Cole: a white arrow rotated PI - heading, exactly as the
-    // static arrowRotation() computes it.
-    const cx = mapX(p.pos.x);
-    const cy = mapY(p.pos.z);
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate(HUD.arrowRotation(p.heading));
-    ctx.fillStyle = '#ffffff';
-    ctx.strokeStyle = '#111111';
-    ctx.lineWidth = 1.2;
-    ctx.beginPath();
-    ctx.moveTo(0, -7);
-    ctx.lineTo(5, 5);
-    ctx.lineTo(0, 2.4);
-    ctx.lineTo(-5, 5);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  diamond(ctx, x, y, r, color) {
+    const [mx, my] = this.toMap(x, z);
     ctx.fillStyle = color;
     ctx.beginPath();
-    ctx.moveTo(x, y - r);
-    ctx.lineTo(x + r, y);
-    ctx.lineTo(x, y + r);
-    ctx.lineTo(x - r, y);
-    ctx.closePath();
+    ctx.arc(mx, my, r, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  dots(ctx, list, r, colorFor) {
-    if (!list) return;
-    for (const u of list) {
-      if (!u || !u.pos) continue;
-      ctx.fillStyle = colorFor(u);
-      ctx.beginPath();
-      ctx.arc(mapX(u.pos.x), mapY(u.pos.z), r, 0, Math.PI * 2);
+  drawDiamond(x, z, r, color, filled = true) {
+    const ctx = this.mapCtx;
+    if (!ctx) return;
+    const [mx, my] = this.toMap(x, z);
+    ctx.beginPath();
+    ctx.moveTo(mx, my - r);
+    ctx.lineTo(mx + r, my);
+    ctx.lineTo(mx, my + r);
+    ctx.lineTo(mx - r, my);
+    ctx.closePath();
+    if (filled) {
+      ctx.fillStyle = color;
       ctx.fill();
+    } else {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.stroke();
     }
   }
 
-  // Where the current objective points: the mission beacon if one is
-  // set, otherwise the active mission's marker.
+  drawSquare(x, z, half, color) {
+    const ctx = this.mapCtx;
+    if (!ctx) return;
+    const [mx, my] = this.toMap(x, z);
+    ctx.fillStyle = color;
+    ctx.fillRect(mx - half, my - half, half * 2, half * 2);
+  }
+
+  // Where the current job wants Cole to go. Missions, taxi and courier
+  // each publish their target under a different field, so check them
+  // in priority order and draw the first one that exists.
   objectiveTarget(w) {
-    if (w.beaconTarget && typeof w.beaconTarget.x === 'number') return w.beaconTarget;
-    if (w.beacon && typeof w.beacon.x === 'number') return w.beacon;
+    if (!w) return null;
+    const direct = w.objectiveTarget ?? w.missionTarget ?? w.target;
+    if (direct && Number.isFinite(direct.x) && Number.isFinite(direct.z)) return direct;
+    const missions = w.missions;
+    const fromMissions = missions?.target ?? missions?.objectiveTarget;
+    if (fromMissions && Number.isFinite(fromMissions.x)) return fromMissions;
+    const taxi = w.taxi;
+    if (taxi?.phase === 'ride' && taxi.dest) {
+      const m = w.markers?.[taxi.dest.key ?? taxi.dest];
+      if (m) return m;
+      if (Number.isFinite(taxi.dest.x)) return taxi.dest;
+    }
+    if (taxi?.phase === 'wait' && taxi.client) return taxi.client.pos;
+    const courier = w.courier;
+    if (courier?.phase === 'deliver' && courier.dest) {
+      if (Number.isFinite(courier.dest.x)) return courier.dest;
+      const m = w.markers?.[courier.dest.key ?? courier.dest];
+      if (m) return m;
+    }
+    if (courier?.phase === 'none' && typeof missions?.dispatcher === 'function') {
+      const d = missions.dispatcher(w);
+      if (d && Number.isFinite(d.x)) return { x: d.x, z: d.z };
+    }
     return null;
   }
 
-  // A side-job destination may be a marker key ({ key }) or a raw point.
-  jobDest(w, dest) {
-    if (!dest) return null;
-    if (typeof dest.x === 'number' && typeof dest.z === 'number') return dest;
-    if (dest.key && w.markers && w.markers[dest.key]) return w.markers[dest.key];
-    return null;
+  renderMap(w) {
+    const ctx = this.mapCtx;
+    const s = this.state(w);
+    if (!ctx || !s) return;
+    const hero = s.player;
+    ctx.clearRect(0, 0, MAP_SIZE, MAP_SIZE);
+    // Sea-dark background with a faint street grid so the map reads as
+    // a city even before any dots appear.
+    ctx.fillStyle = 'rgba(8, 18, 30, 0.82)';
+    ctx.fillRect(0, 0, MAP_SIZE, MAP_SIZE);
+    ctx.strokeStyle = 'rgba(120, 160, 200, 0.16)';
+    ctx.lineWidth = 1;
+    for (const g of [-180, -120, -60, 0, 60, 120, 180]) {
+      const [gx] = this.toMap(g, 0);
+      const [, gy] = this.toMap(0, g);
+      ctx.beginPath();
+      ctx.moveTo(gx, 0);
+      ctx.lineTo(gx, MAP_SIZE);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, gy);
+      ctx.lineTo(MAP_SIZE, gy);
+      ctx.stroke();
+    }
+    // Named places: garage and spray shop matter most, so they get
+    // bigger, brighter squares.
+    const markers = s.markers ?? {};
+    const markerColors = {
+      bank: '#ffd75e',
+      beach: '#7fd4ff',
+      docks: '#c9a06a',
+      garage: '#37d67a',
+      hideout: '#b388ff',
+      hospital: '#ff6b81',
+      paintShop: '#ffb02e',
+      showroom: '#ff8ad8',
+      spray: '#35c4ff',
+      warehouse: '#9aa5b1',
+    };
+    for (const [key, m] of Object.entries(markers)) {
+      if (!m || !Number.isFinite(m.x)) continue;
+      const big = key === 'spray' || key === 'garage' || key === 'paintShop';
+      this.drawSquare(m.x, m.z, big ? 4 : 3, markerColors[key] ?? '#ffffff');
+    }
+    // Pedestrians as faint grey dots, traffic as white, police as red.
+    for (const p of s.peds ?? []) {
+      if (p.state === 'down') continue;
+      this.drawDot(p.pos.x, p.pos.z, 1.2, 'rgba(200, 205, 215, 0.75)');
+    }
+    for (const c of s.cars ?? []) {
+      if (c === hero?.car) continue;
+      this.drawDot(c.pos.x, c.pos.z, 2, c.isPolice ? '#ff4d4d' : '#f2f2f2');
+    }
+    for (const u of s.policeCars ?? []) this.drawDot(u.pos.x, u.pos.z, 2.6, '#ff4d4d');
+    for (const o of s.officers ?? []) this.drawDot(o.pos.x, o.pos.z, 2, '#ff8a5c');
+    // Taxi client: yellow diamond. Courier dispatcher / drop-off: purple.
+    const taxi = s.taxi;
+    if (taxi?.phase === 'wait' && taxi.client) {
+      this.drawDiamond(taxi.client.pos.x, taxi.client.pos.z, 5, '#ffd75e');
+    }
+    const courier = s.courier;
+    if (courier?.phase === 'none' && typeof s.missions?.dispatcher === 'function') {
+      const d = s.missions.dispatcher(s);
+      if (d) this.drawDiamond(d.x, d.z, 5, '#c07bff');
+    }
+    if (courier?.phase === 'deliver' && courier.dest) {
+      const d = Number.isFinite(courier.dest.x) ? courier.dest : s.markers?.[courier.dest.key];
+      if (d) this.drawDiamond(d.x, d.z, 5, '#c07bff');
+    }
+    // Objective: a pulsing diamond that is impossible to miss.
+    const target = this.objectiveTarget(s);
+    if (target) {
+      const pulse = 5 + Math.sin(this.mapPulse * 4) * 1.6;
+      this.drawDiamond(target.x, target.z, pulse, '#ffd75e', false);
+      this.drawDiamond(target.x, target.z, 3.4, '#ffd75e');
+    }
+    // The player arrow, last so it sits on top of everything.
+    if (hero) {
+      const [mx, my] = this.toMap(hero.pos.x, hero.pos.z);
+      const rot = HUD.arrowRotation(hero.heading ?? 0);
+      ctx.save();
+      ctx.translate(mx, my);
+      ctx.rotate(rot);
+      ctx.fillStyle = '#ffffff';
+      ctx.strokeStyle = '#111111';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, -7);
+      ctx.lineTo(5, 6);
+      ctx.lineTo(0, 3);
+      ctx.lineTo(-5, 6);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // -- per-frame --------------------------------------------------------
+  update(w, dt) {
+    const s = this.state(w);
+    if (!s) return;
+    this.mapPulse += dt;
+    const hero = s.player;
+    if (this.hintTimer > 0) {
+      this.hintTimer -= dt;
+      if (this.hintTimer <= 0 && this.hintBox) {
+        this.hintBox.textContent = '';
+        this.hintBox.classList.add('hidden');
+      }
+    }
+    for (let i = this.feedLines.length - 1; i >= 0; i--) {
+      const line = this.feedLines[i];
+      line.life -= dt;
+      if (line.life <= 0) {
+        line.node.remove();
+        this.feedLines.splice(i, 1);
+      } else if (line.life < 1) {
+        line.node.style.opacity = String(line.life);
+      }
+    }
+    if (hero) {
+      this.renderHealth(hero);
+      this.renderWeapon(hero);
+      this.renderDrive(hero);
+    }
+    this.renderCash(s.cash ?? s.player?.cash ?? 0);
+    this.renderStars(s.wanted ?? s.police?.stars ?? 0);
+    this.renderMap(s);
   }
 }

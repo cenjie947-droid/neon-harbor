@@ -1,11 +1,12 @@
-// Neon Harbor — shared world state and helpers.
-//
-// One plain object (`makeGame()`) holds everything the modules pass
-// around, so no module keeps hidden global state. Geometry helpers live
-// here too: collision against the city's axis-aligned building boxes and
-// line-of-sight checks the police use to decide whether they can see Cole.
+// Neon Harbor — shared world state and geometry helpers.
+// One place owns the numbers every module reads: the world size, the road
+// grid, the live game object, and the small math routines used for
+// collision, steering and distance checks.
+
 import * as THREE from 'three';
 
+// World dimensions, in metres. The playable city is a square; the beach
+// and sea sit on its southern edge.
 export const WORLD = {
   half: 240,
   roadWidth: 10,
@@ -16,12 +17,87 @@ export const WORLD = {
   gridMax: 180,
 };
 
-// Road centre-lines. The city grid, the traffic and the mission driving
-// all agree on these lines.
-export const GRID_LINES = [];
+// Road centre-lines. The city is a regular grid, so the X roads and the Z
+// roads share the same line positions.
+const GRID_LINES = [];
 for (let v = WORLD.gridMin; v <= WORLD.gridMax; v += WORLD.gridStep) {
   GRID_LINES.push(v);
 }
+
+// Build a fresh game object. Main fills in the three.js pieces (scene,
+// camera, renderer, sun, sea, ferris) and the subsystem handles
+// (player, hud, audio, fx, police, combat, missions, save) once they
+// exist; until then they stay null so nothing reads a half-built system.
+export function makeGame() {
+  const g = {
+    // Run state.
+    mode: 'title',
+    time: 0,
+    cash: 0,
+    wanted: 0,
+    heatTimer: 0,
+
+    // Story progress.
+    missionIndex: 0,
+    missionStep: 0,
+    missionActive: false,
+    missionDone: false,
+    missionTimer: 0,
+
+    // Taxi side job (free roam).
+    taxi: { phase: 'none', fare: 0, client: null, dest: null, waitTimer: 8 },
+
+    // Navigation aids.
+    beacon: null,
+    beaconTarget: null,
+
+    // City data, filled in by city.js.
+    markers: {},
+    roads: { xs: [...GRID_LINES], zs: [...GRID_LINES] },
+    colliders: [],
+
+    // Live entities.
+    cars: [],
+    traffic: [],
+    peds: [],
+    policeCars: [],
+    officers: [],
+    enemies: [],
+    cometGT: null,
+    bankVan: null,
+
+    // Lifetime totals shown on the ending screen.
+    stats: { carsStolen: 0, missionsDone: 0, crimes: 0 },
+
+    // Input state, fed by main's listeners.
+    input: { keys: new Set(), mouseDX: 0, mouseDY: 0 },
+
+    // Subsystem handles, attached by main after construction.
+    player: null,
+    hud: null,
+    audio: null,
+    fx: null,
+    police: null,
+    combat: null,
+    missions: null,
+    save: null,
+
+    // Three.js handles, attached by main.
+    scene: null,
+    camera: null,
+    renderer: null,
+    sun: null,
+    sea: null,
+    ferris: null,
+
+    // Rendering switch used by the headless test driver.
+    renderEnabled: true,
+    _render: true,
+  };
+  return g;
+}
+
+// --- small math helpers -------------------------------------------------
 
 export function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
@@ -43,7 +119,7 @@ export function dist2D(x1, z1, x2, z2) {
   return Math.hypot(x2 - x1, z2 - z1);
 }
 
-// Shortest-arc interpolation between two headings (radians).
+// Shortest-arc interpolation between two headings.
 export function angleLerp(a, b, t) {
   let d = b - a;
   while (d > Math.PI) d -= Math.PI * 2;
@@ -52,105 +128,80 @@ export function angleLerp(a, b, t) {
 }
 
 export function inWorldBounds(x, z) {
-  return Math.abs(x) <= WORLD.half && Math.abs(z) <= WORLD.half;
+  const h = WORLD.half;
+  return x >= -h && x <= h && z >= -h && z <= h;
 }
 
 export function vec3(x, y, z) {
   return new THREE.Vector3(x, y, z);
 }
 
-// Circle vs the city's building boxes. Returns a RESOLVED position: the
-// point slid out of any box it overlapped, plus whether anything was hit.
-// Callers test `.hit` and use `.x` / `.z` — never a bare boolean.
+// --- collision ----------------------------------------------------------
+
+// Resolve a circle (centre x,z, radius r) against every box collider.
+// Returns { hit, x, z }: hit is true when any collider pushed the circle,
+// and x/z are the resolved centre — slid out of the box along the axis of
+// smallest penetration. Callers test .hit and use .x/.z as the new
+// position; the return is a resolved position, never a plain boolean.
 export function collideCircle(game, x, z, r) {
   let hit = false;
+  let px = x;
+  let pz = z;
   for (const c of game.colliders) {
-    const dx = x - c.x;
-    const dz = z - c.z;
-    const px = c.hw + r - Math.abs(dx);
-    if (px <= 0) continue;
-    const pz = c.hd + r - Math.abs(dz);
-    if (pz <= 0) continue;
+    const hw = c.hw || 0;
+    const hd = c.hd || 0;
+    const dx = px - c.x;
+    const dz = pz - c.z;
+    const ox = hw + r - Math.abs(dx);
+    const oz = hd + r - Math.abs(dz);
+    if (ox <= 0 || oz <= 0) continue;
     hit = true;
-    if (px < pz) x = c.x + (dx >= 0 ? 1 : -1) * (c.hw + r);
-    else z = c.z + (dz >= 0 ? 1 : -1) * (c.hd + r);
-  }
-  return { hit, x, z };
-}
-
-// True when any building box sits between the two ground points.
-// Sampled every ~2 m so a thin wall still blocks the sightline.
-export function segmentBlocked(game, x1, z1, x2, z2) {
-  const d = Math.hypot(x2 - x1, z2 - z1);
-  const steps = Math.max(1, Math.ceil(d / 2));
-  for (let i = 1; i < steps; i++) {
-    const t = i / steps;
-    const x = x1 + (x2 - x1) * t;
-    const z = z1 + (z2 - z1) * t;
-    for (const c of game.colliders) {
-      if (Math.abs(x - c.x) < c.hw + 0.5 && Math.abs(z - c.z) < c.hd + 0.5) {
-        return true;
-      }
+    if (ox < oz) {
+      px = c.x + (dx >= 0 ? hw + r : -(hw + r));
+    } else {
+      pz = c.z + (dz >= 0 ? hd + r : -(hd + r));
     }
   }
-  return false;
+  // Keep the circle inside the playable square too.
+  const h = WORLD.half - r;
+  if (px < -h) { px = -h; hit = true; }
+  if (px > h) { px = h; hit = true; }
+  if (pz < -h) { pz = -h; hit = true; }
+  if (pz > h) { pz = h; hit = true; }
+  return { hit, x: px, z: pz };
 }
 
-// Fresh per-run game state. The main entry fills in scene / camera /
-// renderer and the subsystem objects (player, audio, fx, hud, police,
-// combat, missions, save) after creating this.
-export function makeGame() {
-  return {
-    mode: 'title',
-    time: 0,
-    cash: 0,
-    wanted: 0,
-    heatTimer: 0,
-
-    missionIndex: 0,
-    missionStep: 0,
-    missionActive: false,
-    missionDone: false,
-    missionTimer: 0,
-
-    taxi: { phase: 'none', fare: 0, client: null, dest: null, waitTimer: 8 },
-    beacon: null,
-    beaconTarget: null,
-
-    markers: {},
-    roads: { xs: [...GRID_LINES], zs: [...GRID_LINES] },
-    colliders: [],
-
-    cars: [],
-    traffic: [],
-    peds: [],
-    policeCars: [],
-    officers: [],
-    enemies: [],
-    cometGT: null,
-    bankVan: null,
-
-    stats: { carsStolen: 0, missionsDone: 0, crimes: 0 },
-
-    input: { keys: new Set(), mouseDX: 0, mouseDY: 0 },
-
-    player: null,
-    hud: null,
-    audio: null,
-    fx: null,
-    police: null,
-    combat: null,
-    missions: null,
-    save: null,
-
-    scene: null,
-    camera: null,
-    renderer: null,
-    sun: null,
-    sea: null,
-    ferris: null,
-
-    renderEnabled: true,
-    _render: true,
-  };
+// True when the straight segment from (x1,z1) to (x2,z2) crosses any
+// box collider (with a small clearance margin), used for police and
+// pedestrian line-of-sight checks.
+export function segmentBlocked(game, x1, z1, x2, z2) {
+  const dx = x2 - x1;
+  const dz = z2 - z1;
+  for (const c of game.colliders) {
+    const hw = (c.hw || 0) + 0.5;
+    const hd = (c.hd || 0) + 0.5;
+    // Slab test against the box.
+    let tmin = 0;
+    let tmax = 1;
+    let ok = true;
+    const axes = [
+      { d: dx, p: x1 - c.x, half: hw },
+      { d: dz, p: z1 - c.z, half: hd },
+    ];
+    for (const ax of axes) {
+      if (Math.abs(ax.d) < 1e-9) {
+        if (Math.abs(ax.p) > ax.half) { ok = false; break; }
+      } else {
+        let t0 = (-ax.half - ax.p) / ax.d;
+        let t1 = (ax.half - ax.p) / ax.d;
+        if (t0 > t1) { const tmp = t0; t0 = t1; t1 = tmp; }
+        if (tmin > tmax) { ok = false; break; }
+        if (t0 > tmin) tmin = t0;
+        if (t1 < tmax) tmax = t1;
+        if (tmin > tmax) { ok = false; break; }
+      }
+    }
+    if (ok && tmin <= tmax && tmax >= 0 && tmin <= 1) return true;
+  }
+  return false;
 }

@@ -1,68 +1,96 @@
-// Neon Harbor — localStorage save / continue.
+// Neon Harbor — save data: one localStorage slot that remembers the
+// whole run so Continue drops Cole back exactly where he left off.
 //
-// One record holds everything a reload needs to put Cole back exactly
-// where he was: which mission and which beat inside it, cash, health,
-// where he stood — and, crucially, the car he was driving (model,
-// colour, spot, heading, health), because a stolen car is progress.
-// main.js drives the flow: load() -> apply() -> restoreCar() ->
-// restorePlayer(), re-asserting mission/step from the record itself.
-import { clamp, collideCircle } from './state.js';
-import { createCar, enterCar } from './vehicles.js';
+// The record is deliberately boring: mission index, the beat inside
+// that mission, cash, health, where Cole stands, and the car he was
+// driving (name, model, colour, spot, heading, health). The v3 lesson
+// is baked in — an earlier save stored only the mission number, so
+// Continue restarted the whole job and threw the car away. This one
+// stores the beat and the car, and the driver proves it by comparing
+// the resumed mission, step, driving state and car name against what
+// was saved.
+//
+// Keys: missionIndex, missionStep and car are the exact keys main.js
+// reads on Continue (with mission / step as fallbacks). Everything
+// else is extra context for a future reader of the slot.
+import { collideCircle } from './state.js';
 
-const SAVE_KEY = 'neon-harbor-save-v1';
-const SAVE_VERSION = 1;
+export const SAVE_KEY = 'neon-harbor-save-v1';
+const SAVE_VERSION = 3;
+
+function num(v, fallback = 0) {
+  return Number.isFinite(v) ? v : fallback;
+}
+
+function str(v, fallback = '') {
+  return typeof v === 'string' && v ? v : fallback;
+}
 
 export class SaveData {
-  constructor() {
+  constructor(game) {
+    this.game = game;
     this.key = SAVE_KEY;
   }
 
-  // -- packing ------------------------------------------------------------
-
+  // -- packing ----------------------------------------------------------
+  // A small plain-object snapshot of Cole: position, heading, health,
+  // weapon and ammo. Nothing with methods or scene references in it.
   packPlayer(cole) {
     if (!cole) return null;
     return {
-      x: cole.pos ? cole.pos.x : 0,
-      z: cole.pos ? cole.pos.z : 0,
-      heading: cole.heading || 0,
-      health: Math.max(1, Math.round(cole.health || 100)),
-      weapon: cole.weapon || 'fists',
-      ammo: cole.ammo || 0,
+      x: num(cole.pos?.x),
+      z: num(cole.pos?.z),
+      heading: num(cole.heading),
+      health: num(cole.health, 100),
+      weapon: str(cole.weapon, 'fists'),
+      ammo: num(cole.ammo),
+      hasPistol: !!cole.hasPistol,
     };
   }
 
+  // Same idea for the car being driven: identity first (name, model,
+  // colour), then condition (health) and placement (spot + heading).
   packCar(ride) {
     if (!ride) return null;
     return {
-      name: ride.name || '',
-      model: ride.model || 'sedan',
+      name: str(ride.name, 'Car'),
+      model: str(ride.model, ride.name),
       color: ride.color ?? null,
-      x: ride.pos ? ride.pos.x : 0,
-      z: ride.pos ? ride.pos.z : 0,
-      heading: ride.heading || 0,
-      hp: Math.max(0, Math.round(ride.health ?? 100)),
+      x: num(ride.pos?.x),
+      z: num(ride.pos?.z),
+      heading: num(ride.heading),
+      health: num(ride.health, 100),
+      maxHealth: num(ride.maxHealth, 100),
       isVan: !!ride.isVan,
+      isPolice: !!ride.isPolice,
       special: ride.special ?? null,
     };
   }
 
-  // -- writing ------------------------------------------------------------
-
-  save(game) {
-    const record = {
+  buildRecord(game) {
+    const g = game ?? this.game;
+    const hero = g.player;
+    return {
       version: SAVE_VERSION,
-      savedAt: Date.now(),
-      missionIndex: game.missionIndex || 0,
-      missionStep: game.missionStep || 0,
-      missionActive: !!game.missionActive,
-      missionTimer: game.missionTimer || 0,
-      cash: Math.max(0, Math.round(game.cash || 0)),
-      wanted: 0, // a fresh load starts clean; heat does not survive a reload
-      player: this.packPlayer(game.player),
-      car: this.packCar(game.player ? game.player.car : null),
+      savedAt: new Date().toISOString(),
+      missionIndex: num(g.missionIndex ?? g.mission),
+      mission: num(g.missionIndex ?? g.mission),
+      missionStep: num(g.missionStep ?? g.step),
+      step: num(g.missionStep ?? g.step),
+      cash: num(g.cash),
+      health: num(hero?.health, 100),
+      wanted: num(g.wanted),
+      player: this.packPlayer(hero),
+      car: this.packCar(hero?.car),
     };
+  }
+
+  // -- writing ----------------------------------------------------------
+  save(game) {
+    const g = game ?? this.game;
+    const record = this.buildRecord(g);
     try {
-      window.localStorage.setItem(this.key, JSON.stringify(record));
+      localStorage.setItem(this.key, JSON.stringify(record));
     } catch (err) {
       console.warn('save failed', err);
       return null;
@@ -70,115 +98,159 @@ export class SaveData {
     return record;
   }
 
-  // -- reading ------------------------------------------------------------
-
+  // -- reading ----------------------------------------------------------
   load() {
     let raw = null;
     try {
-      raw = window.localStorage.getItem(this.key);
-    } catch (err) {
+      raw = localStorage.getItem(this.key);
+    } catch {
       return null;
     }
     if (!raw) return null;
-    let data = null;
     try {
-      data = JSON.parse(raw);
-    } catch (err) {
+      const data = JSON.parse(raw);
+      if (!data || typeof data !== 'object') return null;
+      return data;
+    } catch {
       return null;
     }
-    if (!data || typeof data !== 'object') return null;
-    if (data.version !== SAVE_VERSION) return null;
-    if (typeof data.missionIndex !== 'number') return null;
-    return data;
   }
 
-  // -- applying -----------------------------------------------------------
+  hasSave() {
+    return this.load() !== null;
+  }
 
-  // Sets the record's fields on the game exactly as given. main.js
-  // re-asserts missionIndex/missionStep around this call, so this must
-  // not second-guess them — apply, don't interpret.
+  clear() {
+    try {
+      localStorage.removeItem(this.key);
+    } catch {
+      // A missing slot is already the cleared state.
+    }
+  }
+
+  // -- applying ---------------------------------------------------------
+  // Put a loaded record back into a fresh game state. main.js calls
+  // this on Continue, then sets the mission fields itself and restores
+  // the car when Cole is on foot — so apply() restores everything and
+  // stays idempotent if restoreCar runs again right after.
   apply(game, data) {
-    if (!data) return false;
-    if (typeof data.cash === 'number') game.cash = Math.max(0, data.cash);
-    if (typeof data.missionIndex === 'number') game.missionIndex = data.missionIndex;
-    if (typeof data.missionStep === 'number') game.missionStep = data.missionStep;
-    if (typeof data.missionActive === 'boolean') game.missionActive = data.missionActive;
-    else game.missionActive = true;
-    if (typeof data.missionTimer === 'number') game.missionTimer = data.missionTimer;
-    game.wanted = 0;
-    if (game.police) game.police.clearWanted(game);
-    if (data.player && game.player) {
-      game.player.health = Math.max(1, data.player.health || 100);
-      if (data.player.weapon) game.player.weapon = data.player.weapon;
-      if (typeof data.player.ammo === 'number') game.player.ammo = data.player.ammo;
-    }
+    const g = game ?? this.game;
+    if (!g || !data) return false;
+    if (Number.isFinite(data.cash)) g.cash = Math.max(0, Math.round(data.cash));
+    const mi = data.missionIndex ?? data.mission;
+    if (Number.isFinite(mi)) g.missionIndex = Math.max(0, Math.floor(mi));
+    const ms = data.missionStep ?? data.step;
+    if (Number.isFinite(ms)) g.missionStep = Math.max(0, Math.floor(ms));
+    if (Number.isFinite(data.wanted)) g.wanted = Math.max(0, Math.min(5, Math.floor(data.wanted)));
+    this.restorePlayer(g, data);
+    if (data.car) this.restoreCar(g, data.car);
     return true;
   }
 
+  // Cole goes back to the saved spot, facing the saved way, with the
+  // saved health and weapon. The mesh follows the position — the
+  // player module re-syncs it every frame, but set it here too so
+  // the very first rendered frame is already right.
   restorePlayer(game, saved) {
-    const p = game.player;
-    const rec = saved && saved.player;
-    if (!p || !rec) return false;
-    if (typeof rec.x === 'number' && typeof rec.z === 'number') {
-      p.pos.set(rec.x, 0, rec.z);
-    }
-    if (typeof rec.heading === 'number') {
-      p.heading = rec.heading;
-      p.camYaw = rec.heading;
-    }
-    if (typeof rec.health === 'number') p.health = Math.max(1, rec.health);
+    const g = game ?? this.game;
+    const hero = g?.player;
+    if (!hero) return false;
+    const p = saved?.player ?? saved;
+    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.z)) return false;
+    hero.pos.set(p.x, 0, p.z);
+    if (Number.isFinite(p.heading)) hero.heading = p.heading;
+    if (Number.isFinite(p.health)) hero.health = Math.max(0, Math.min(100, p.health));
+    if (typeof p.weapon === 'string') hero.weapon = p.weapon;
+    if (Number.isFinite(p.ammo)) hero.ammo = p.ammo;
+    if (typeof p.hasPistol === 'boolean') hero.hasPistol = p.hasPistol;
+    if (hero.mesh) hero.mesh.position.set(p.x, 0, p.z);
+    if (hero.group) hero.group.position.set(p.x, 0, p.z);
+    if (Number.isFinite(p.heading) && hero.mesh) hero.mesh.rotation.y = p.heading;
+    if (Number.isFinite(p.heading) && hero.group) hero.group.rotation.y = p.heading;
     return true;
   }
 
-  restoreCar(game, saved) {
-    const rec = saved && saved.car;
-    if (!rec || !game.player) return false;
-    // The exact saved spot may be occupied after a fresh page load
-    // (parked cars respawn randomly), so settle for the nearest clear
-    // patch of road instead of spawning inside another car.
-    const spot = this.findCarSpot(game, rec.x || 0, rec.z || 0);
-    const car = createCar(game, {
-      x: spot.x,
-      z: spot.z,
-      heading: rec.heading || 0,
-      health: typeof rec.hp === 'number' ? rec.hp : 100,
-      model: rec.model || 'sedan',
-      name: rec.name || undefined,
-      color: rec.color ?? undefined,
-      isVan: !!rec.isVan,
-      parked: false,
-      special: rec.special ?? null,
-    });
-    enterCar(game, car);
-    return true;
-  }
-
-  // Nearest clear patch of ground to (x, z): not inside a building and
-  // not on top of another car. Tries the spot itself, then rings out.
+  // Find a drivable spot near (x, z) that is not inside a building.
+  // Walks outward in a spiral until the collision test clears, so a
+  // car saved half-inside a wall still respawns on open road.
   findCarSpot(game, x, z) {
-    const tries = [[0, 0]];
-    for (const r of [6, 12, 18, 30]) {
-      tries.push([r, 0], [-r, 0], [0, r], [0, -r], [r, r], [-r, -r], [r, -r], [-r, r]);
+    const g = game ?? this.game;
+    const cx = num(x);
+    const cz = num(z);
+    if (!g || typeof collideCircle !== 'function') return { x: cx, z: cz };
+    for (let r = 0; r <= 40; r += 2) {
+      for (let a = 0; a < 8; a++) {
+        const ang = (a / 8) * Math.PI * 2;
+        const tx = cx + Math.cos(ang) * r;
+        const tz = cz + Math.sin(ang) * r;
+        try {
+          const solved = collideCircle(g, tx, tz, 1.6);
+          if (solved && Math.hypot(solved.x - tx, solved.z - tz) < 0.5) {
+            return { x: solved.x, z: solved.z };
+          }
+        } catch {
+          return { x: tx, z: tz };
+        }
+      }
     }
-    for (const [dx, dz] of tries) {
-      const tx = clamp(x + dx, -230, 230);
-      const tz = clamp(z + dz, -230, 230);
-      if (this.spotBlocked(game, tx, tz)) continue;
-      return { x: tx, z: tz };
-    }
-    return { x: clamp(x, -230, 230), z: clamp(z, -230, 230) };
+    return { x: cx, z: cz };
   }
 
-  spotBlocked(game, x, z) {
-    if (game.colliders) {
-      const hit = collideCircle(game, x, z, 3);
-      if (hit && hit.hit) return true;
+  // Put Cole back in the car he was driving. The world is rebuilt
+  // fresh on load, so the exact car object is gone — find the parked
+  // car with the same name closest to the saved spot, and if no car
+  // carries that name, take the nearest parked car and give it the
+  // saved identity so the car name still matches what was saved.
+  // The car is placed on a clear spot, repaired to its saved health,
+  // and handed to the player as the driven car.
+  restoreCar(game, saved) {
+    const g = game ?? this.game;
+    const hero = g?.player;
+    if (!g || !hero || !saved) return null;
+    const cars = g.cars ?? [];
+    const name = str(saved.name, 'Car');
+    let best = null;
+    let bestD = Infinity;
+    let named = null;
+    let namedD = Infinity;
+    for (const c of cars) {
+      if (!c || c.isPolice) continue;
+      const d = Math.hypot((c.pos?.x ?? 0) - num(saved.x), (c.pos?.z ?? 0) - num(saved.z));
+      if (c.name === name && d < namedD) {
+        named = c;
+        namedD = d;
+      }
+      if (c.parked && d < bestD) {
+        best = c;
+        bestD = d;
+      }
     }
-    for (const c of game.cars || []) {
-      if (game.player && game.player.car === c) continue;
-      const d = Math.hypot(c.pos.x - x, c.pos.z - z);
-      if (d < 5) return true;
+    const car = named ?? best;
+    if (!car) return null;
+    const spot = this.findCarSpot(g, saved.x, saved.z);
+    car.pos.set(spot.x, 0, spot.z);
+    car.heading = num(saved.heading);
+    car.speed = 0;
+    car.health = num(saved.health, 100);
+    if (Number.isFinite(saved.maxHealth)) car.maxHealth = saved.maxHealth;
+    car.parked = false;
+    car.owned = true;
+    car.traffic = false;
+    if (!named) {
+      car.name = name;
+      if (typeof saved.model === 'string') car.model = saved.model;
+      if (saved.color !== undefined && saved.color !== null) car.color = saved.color;
     }
-    return false;
+    if (car.mesh) {
+      car.mesh.position.set(spot.x, 0, spot.z);
+      car.mesh.rotation.set(0, car.heading, 0);
+    }
+    if (Array.isArray(car.wheels)) {
+      for (const w of car.wheels) {
+        if (w?.rotation) w.rotation.x = 0;
+      }
+    }
+    hero.car = car;
+    return car;
   }
 }

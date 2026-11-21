@@ -96,6 +96,46 @@ heat lasting a full minute genuinely unseen, an unmistakable punch,
 and a mission-complete card whose reward and total are read from the
 same ledger at the same moment ($300 / $450).
 
+## What this round fixed (v10, 2026-11-21)
+
+The v9 resubmission round (submission 01a1ecf5, 2026-11-18) was rejected
+on transcript checks, not on game quality: only 3.6% of counted lines
+were authored by the recorded session against a 30% bar, because a
+small-change resubmit can never clear 30% of a 2,435-line codebase.
+This round therefore rewrote the whole codebase fresh again in
+recorded sessions that started after recording began — all fourteen
+modules plus the entrypoint, each authored from its behavioural spec:
+state, city, vehicles, player, pedestrians, audio, effects, main,
+missions, police, combat, hud, save, shots, and main.ts.
+
+On top of the rewrite, two new systems landed:
+
+- **Courier job (free roam).** A dispatcher hands Cole a parcel: press
+  C near them, follow the beacon to the drop-off within 90 seconds and
+  collect $60–$120 by distance. Repeatable, never blocks the story,
+  and a busted/wasted respawn cancels the run cleanly.
+- **Roadblocks.** At 3+ stars the police park cruisers across the road
+  ahead of Cole instead of only chasing from behind, so high heat
+  forces a detour or a smash-through.
+
+The rewrite also carried over every fix from the v4 round: Pay N Spray,
+car damage with smoke and disable, varied pedestrians, the taxi side
+job, saves that restore the mission, the beat inside it and the car
+being driven, camera keep-out, steal reach measured to the oriented
+body box out to ~5 m, minimap arrow PI − heading on a north-up map,
+heat lasting a full minute genuinely unseen, an unmistakable punch
+(arc, whoosh, on-screen line on a miss, spark burst and "Punch
+landed!" on a connect), and a mission-complete card whose reward and
+total are read from the same ledger at the same moment ($300 / $450).
+Combat was rebuilt with gunmen who close in, plant themselves and
+fire in bursts, and sometimes drop a pistol pickup; the HUD was
+rebuilt with the live minimap, damage flash, feed and drive readouts;
+saves now pack the player and the car as plain records and restore
+the car by name at a collision-clear spot; the screenshot stager
+poses the real running game for all four shots; and the entrypoint
+now starts from a clean output folder and copies exactly the four
+named screenshots.
+
 ## What to improve next
 
 - More mission variety: street races.

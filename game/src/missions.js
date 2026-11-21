@@ -1,486 +1,543 @@
-// Neon Harbor — story missions, taxi fares and courier runs.
-// Five jobs in order, then free roam. A job's steps run in order; a step
-// that is already satisfied the moment play resumes advances at once,
-// so a save/continue that restores the player mid-step never stalls.
-// Fresh rewrite for the gta6-01 resubmission.
-import { dist2D, randInt, pick, clamp } from './state.js';
+// Neon Harbor — missions.js
+//
+// Five story jobs in order, plus the two free-roam side jobs (taxi fares
+// and courier parcels) and the Pay N Spray marker key. The story never
+// blocks the side jobs and the side jobs never block the story: side jobs
+// only run while no story job is active, and being busted or wasted
+// cancels them cleanly.
+//
+// Every step is a small object: the line the HUD shows, the map marker
+// the beacon points at, an optional countdown, an optional on-enter
+// hook, and a check that runs every tick. A job pays out the moment its
+// last step checks true; the reward and the new cash total are read from
+// the same ledger at the same moment, so the mission-complete card can
+// never disagree with the cash on the HUD.
+import * as THREE from 'three';
+import { dist2D, randInt, pick } from './state.js';
 import { markTaxiClient, unmarkTaxiClient } from './pedestrians.js';
 
-const MARKER_KEYS = [
-  'bank', 'beach', 'docks', 'garage', 'hideout',
-  'hospital', 'paintShop', 'showroom', 'warehouse',
-];
-const TAXI_OFFER_RANGE = 50;
-const TAXI_PICKUP_RANGE = 8;
-const TAXI_WAIT_SECONDS = 8;
-const COURIER_TAKE_RANGE = 6;
-const COURIER_TIME_LIMIT = 90;
+const NEAR = 9;          // arrival radius for a mission marker, metres
+const TAXI_FARE_MIN = 40;
+const TAXI_FARE_MAX = 80;
+const TAXI_WAIT = 8;     // seconds a taxi offer waits for Cole
+const TAXI_PICKUP = 8;   // metres from the client to pick them up
+const COURIER_TIME = 90; // seconds to run a parcel
+const COURIER_PAY_MIN = 60;
+const COURIER_PAY_MAX = 120;
+const COURIER_PICKUP = 5;
 
-function job(name, reward, briefing, completeText, steps) {
-  return { name, reward, briefing, completeText, steps };
+// Markers a side-job destination may point at.
+const FARE_MARKERS = [
+  'bank', 'beach', 'garage', 'hideout', 'hospital', 'showroom', 'warehouse', 'docks',
+];
+
+// A story job: name, cash reward, briefing text, ordered steps.
+function job(name, reward, briefing, steps) {
+  return { name, reward, briefing, steps };
 }
 
-function nearMarker(w, key, range) {
+function step(text, marker, check, extra = {}) {
+  return { text, marker, check, ...extra };
+}
+
+const nearMarker = (key, radius = NEAR) => (w) => {
   const m = w.markers[key];
   if (!m) return false;
-  return dist2D(w.player.pos.x, w.player.pos.z, m.x, m.z) < range;
-}
+  return dist2D(w.player.pos.x, w.player.pos.z, m.x, m.z) < radius;
+};
 
-function drivingNear(w, key, range) {
-  return !!w.player.car && nearMarker(w, key, range);
-}
+const driving = (w) => !!w.player.car;
+const drivingCar = (car) => (w) => w.player.car === car;
+
+const JOBS = [
+  job(
+    'First Wheels', 150,
+    'Mara Quinn has your first job, Cole. Steal any car off the street and '
+    + 'bring it to the paint shop on the east side. No questions, no scratches '
+    + 'you cannot explain. The shop pays $150 for clean wheels.',
+    [
+      step('Steal any car', null, driving),
+      step('Deliver the car to the paint shop', 'paintShop',
+        (w) => driving(w) && nearMarker('paintShop', 8)(w)),
+    ],
+  ),
+  job(
+    'The Pickup', 300,
+    'A package is waiting at the docks and Mara wants it at her garage '
+    + 'fast. Get in a car, grab the package, then race it back — you have '
+    + 'two minutes once it is in your hands. $300 if it arrives in one piece.',
+    [
+      step('Get in a car', null, driving),
+      step('Pick up the package at the docks', 'docks', nearMarker('docks')),
+      step('Race the package back to Mara’s garage', 'garage',
+        (w) => nearMarker('garage')(w), { timer: 120 }),
+    ],
+  ),
+  job(
+    'Grand Theft Harbor', 400,
+    'Dario Venn keeps his yellow Comet GT on the showroom lot like a trophy. '
+    + 'Steal it, lose the heat, and bring it to the hideout. The alarm will '
+    + 'scream — drive like it. $400 for the Comet.',
+    [
+      step('Steal the yellow Comet GT from the showroom', 'showroom',
+        (w) => drivingCar(w.cometGT)(w),
+        {
+          onEnter(w) {
+            w.police.addWanted(w, 2, 'alarm');
+            this.say(w, 'The showroom alarm is screaming — the cops are coming!');
+          },
+        }),
+      step('Bring the Comet GT to the hideout', 'hideout',
+        (w) => drivingCar(w.cometGT)(w) && nearMarker('hideout')(w)),
+    ],
+  ),
+  job(
+    'Dockside Heat', 500,
+    'Venn’s crew is waiting for you at the warehouse by the docks, and they '
+    + 'brought guns. Get there, survive the ambush, then slip away to the '
+    + 'hideout. $500 — hazard pay, obviously.',
+    [
+      step('Get to the warehouse at the docks', 'warehouse', nearMarker('warehouse', 12)),
+      step('Survive Venn’s ambush', 'warehouse',
+        (w) => this._ambushSpawned && w.enemies.length === 0,
+        {
+          onEnter(w) {
+            this._ambushSpawned = true;
+            const base = w.markers.warehouse;
+            const spots = [[-8, -6], [8, -6], [-8, 8], [8, 8]];
+            for (const [dx, dz] of spots) {
+              try { w.combat.spawnEnemy(w, base.x + dx, base.z + dz); } catch (err) { /* combat */ }
+            }
+            this.say(w, 'Ambush! Venn’s crew is here — fight back!');
+          },
+        }),
+      step('Escape to the hideout', 'hideout', nearMarker('hideout')),
+    ],
+  ),
+  job(
+    'The Big One', 1000,
+    'The Harbor Bank van. Take it, drive it straight through whatever '
+    + 'roadblocks Venn bought, and bring it home to the hideout. Pull this '
+    + 'off and Neon Harbor is yours. $1,000.',
+    [
+      step('Take the Harbor Bank van', 'bank',
+        (w) => drivingCar(w.bankVan)(w),
+        {
+          onEnter(w) {
+            w.police.addWanted(w, 3, 'bank');
+            this.say(w, 'The bank van is hot — every cruiser in the city is coming!');
+          },
+        }),
+      step('Drive the van through the roadblocks to the hideout', 'hideout',
+        (w) => drivingCar(w.bankVan)(w) && nearMarker('hideout', 10)(w)),
+    ],
+  ),
+];
 
 export class Missions {
   constructor(game) {
-    this.game = game;
-    this.taxiCooldown = 2;
-    if (!game.courier) {
-      game.courier = { phase: 'none', pay: 0, dest: null, timeLeft: 0 };
+    this.g = game;
+    this.jobs = JOBS;
+    this._current = null;       // job being played or just completed
+    this._entered = false;      // current step's onEnter already ran
+    this._ambushSpawned = false;
+    this._taxiCooldown = 4;     // seconds until the first taxi offer
+    this._dispatcher = null;    // courier dispatcher figure at the docks
+  }
+
+  // The job being played, or the one just completed (for the card text).
+  get current() {
+    return this._current;
+  }
+
+  isFinished() {
+    return this.g.missionIndex >= this.jobs.length;
+  }
+
+  briefingFor(index) {
+    const j = this.jobs[index];
+    if (!j) return { title: 'FREE ROAM', text: 'No more jobs. The city is yours — keep driving.' };
+    return { title: `JOB ${index + 1} — ${j.name.toUpperCase()}`, text: j.briefing };
+  }
+
+  // -- HUD helpers (all guarded: the HUD must never break a mission) -----
+  say(w, msg) {
+    try { w.hud.showMessage(msg); } catch (err) { /* hud optional */ }
+  }
+
+  objective(w, text) {
+    try { w.hud.setObjective(text); } catch (err) { /* hud optional */ }
+  }
+
+  setBeacon(w, key) {
+    if (!key || !w.markers[key]) {
+      w.beacon = null;
+      w.beaconTarget = null;
+      return;
     }
-    this.jobs = [
-      job(
-        'First Wheels', 150,
-        'Mara Quinn needs a car, no questions asked. Steal any parked car ' +
-        'and bring it to her paint shop. The cops will notice — drive like it.',
-        'First car delivered. Mara paid in full, no questions asked.',
-        [
-          {
-            text: 'Steal a car',
-            check: (w) => !!w.player.car,
-          },
-          {
-            text: "Deliver the car to Mara's paint shop",
-            target: 'paintShop',
-            check: (w) => drivingNear(w, 'paintShop', 8),
-            done: (w) => {
-              if (w.player.car) w.player.car.owned = true;
-              w.hud.showMessage('Mara: "Clean work. She is yours now."');
-            },
-          },
-        ],
-      ),
-      job(
-        'The Pickup', 300,
-        'A buyer is waiting at Mara\'s garage and the car has to be ' +
-        'spotless. Steal a car and deliver it to the garage — ' +
-        'in one piece, if you can.',
-        'The Pickup is done. Mara is already counting the buyer\'s money.',
-        [
-          {
-            text: 'Steal a car',
-            check: (w) => !!w.player.car,
-          },
-          {
-            text: "Deliver the car to Mara's garage",
-            target: 'garage',
-            check: (w) => drivingNear(w, 'garage', 8),
-            done: (w) => {
-              if (w.player.car) w.player.car.owned = true;
-            },
-          },
-        ],
-      ),
-      job(
-        'Dockside Run', 250,
-        'Crates came in at the docks and Dario Venn\'s crew is sniffing ' +
-        'around them. Get to the docks, load up, and run the cargo to ' +
-        'the warehouse before they do.',
-        'Cargo delivered. The warehouse crew owes you one.',
-        [
-          {
-            text: 'Drive to the docks',
-            target: 'docks',
-            check: (w) => nearMarker(w, 'docks', 10),
-            done: (w) => w.hud.showMessage('Cargo loaded — go, before Venn\'s crew shows up.'),
-          },
-          {
-            text: 'Deliver the cargo to the warehouse',
-            target: 'warehouse',
-            check: (w) => nearMarker(w, 'warehouse', 10),
-          },
-        ],
-      ),
-      job(
-        'Hospital Run', 400,
-        'One of Mara\'s drivers got clipped and Venn\'s boys are circling ' +
-        'St. Aurelia Hospital. Get there, pick up the package, and bring ' +
-        'it to the hideout. Expect company.',
-        'Package delivered. Mara\'s driver is safe — for now.',
-        [
-          {
-            text: 'Get to St. Aurelia Hospital',
-            target: 'hospital',
-            check: (w) => nearMarker(w, 'hospital', 10),
-            done: (w) => {
-              w.hud.showMessage('Package collected — Venn\'s crew is on you!');
-              const hx = w.markers.hospital.x;
-              const hz = w.markers.hospital.z;
-              w.combat.spawnEnemy(w, hx + 12, hz + 6);
-              w.combat.spawnEnemy(w, hx - 10, hz + 12);
-              if (w.wanted < 1) w.police.addWanted(w, 1, 'hospital');
-            },
-          },
-          {
-            text: 'Bring the package to the hideout',
-            target: 'hideout',
-            check: (w) => nearMarker(w, 'hideout', 10),
-          },
-        ],
-      ),
-      job(
-        'The Big One', 1000,
-        'The Harbor Bank van runs the same route every night, and tonight ' +
-        'it is ours. Get to the bank, take the van, run it to the ' +
-        'warehouse — and lose the heat before you park it.',
-        'The bank van is ours. Dario Venn just lost the harbor.',
-        [
-          {
-            text: 'Get to the Harbor Bank',
-            target: 'bank',
-            check: (w) => nearMarker(w, 'bank', 10),
-            done: (w) => {
-              this.tagBankVan(w);
-              w.hud.showMessage('There it is — take the van!');
-            },
-          },
-          {
-            text: 'Steal the bank van',
-            target: 'bank',
-            check: (w) => !!w.player.car && w.player.car === this.bankVan,
-            done: (w) => {
-              w.police.addWanted(w, 3, 'bankvan');
-              w.hud.showMessage('The whole harbor is coming. Drive!');
-            },
-          },
-          {
-            text: 'Deliver the van to the warehouse',
-            target: 'warehouse',
-            check: (w) => !!w.player.car && w.player.car === this.bankVan &&
-              nearMarker(w, 'warehouse', 10),
-          },
-          {
-            text: 'Lose the heat',
-            check: (w) => w.wanted === 0,
-          },
-        ],
-      ),
-    ];
-    this.bankVan = null;
+    const m = w.markers[key];
+    w.beaconTarget = m;
+    w.beacon = { x: m.x, z: m.z };
   }
 
-  // ---------------------------------------------------------- story flow
-  current(w) {
-    return this.jobs[w.missionIndex] || null;
-  }
-
-  startMission(w, index) {
-    w.missionIndex = index;
-    w.missionStep = 0;
-    w.missionActive = true;
-    w.missionDone = false;
-    w.missionTimer = 0;
-    this.bankVan = null;
-    const j = this.current(w);
-    if (j) {
-      this.enterStep(w);
-      if (typeof w.showBriefing === 'function') w.showBriefing(j.name, j.briefing);
-    }
-  }
-
-  restartMission(w) {
-    const j = this.current(w);
+  // -- Story flow ---------------------------------------------------------
+  startMission(index, stepIndex = 0) {
+    const w = this.g;
+    const j = this.jobs[index];
     if (!j) return;
-    if (w.player.car) {
-      const exit = w.player.car;
-      w.player.car = null;
-      if (exit) exit.parked = true;
-    }
-    w.player.pos.set(w.markers.hideout.x, 0, w.markers.hideout.z);
-    w.player.heading = 0;
-    w.missionStep = 0;
+    this._current = j;
+    w.missionIndex = index;
+    w.missionStep = stepIndex;
     w.missionActive = true;
     w.missionDone = false;
     w.missionTimer = 0;
-    this.bankVan = null;
-    this.enterStep(w);
-    if (typeof w.showBriefing === 'function') w.showBriefing(j.name, j.briefing);
+    w.freeRoam = false;
+    this._entered = false;
+    this._ambushSpawned = false;
+    try { w.hud.setMissionName(j.name); } catch (err) { /* hud */ }
+    this.showStep(w);
   }
 
-  enterStep(w) {
-    const j = this.current(w);
+  showStep(w) {
+    const j = this.jobs[w.missionIndex];
     if (!j) return;
     const s = j.steps[w.missionStep];
     if (!s) return;
-    w.hud.setMissionName(j.name);
-    w.hud.setObjective(s.text);
-    if (s.target && w.markers[s.target]) {
-      w.beaconTarget = w.markers[s.target];
-      w.beacon = w.markers[s.target];
-    } else {
-      w.beacon = null;
-      w.beaconTarget = null;
-    }
-    if (typeof s.enter === 'function') s.enter(w);
+    this.objective(w, s.text);
+    this.setBeacon(w, s.marker);
+    if (s.timer) w.missionTimer = s.timer;
   }
 
-  activate(w) {
-    // A mission that is current but not active starts the moment play
-    // resumes — this is what picks a continued game back up.
-    if (w.missionIndex >= this.jobs.length) return;
-    if (w.missionActive) return;
-    w.missionActive = true;
-    w.missionDone = false;
-    this.enterStep(w);
-  }
-
-  advanceStep(w) {
-    const j = this.current(w);
+  restartMission(w) {
+    w = w || this.g;
+    const j = this.jobs[w.missionIndex];
     if (!j) return;
-    const s = j.steps[w.missionStep];
-    if (s && typeof s.done === 'function') s.done(w);
-    w.missionStep += 1;
-    if (w.missionStep >= j.steps.length) this.completeMission(w, j);
-    else this.enterStep(w);
+    this.clearAmbush(w);
+    w.missionStep = 0;
+    w.missionActive = true;
+    w.missionTimer = 0;
+    this._entered = false;
+    this._ambushSpawned = false;
+    this.showStep(w);
+    this.say(w, `${j.name} — starting over.`);
   }
 
-  completeMission(w, j) {
-    w.cash += j.reward;
-    const total = w.cash;
+  clearAmbush(w) {
+    for (const e of w.enemies || []) {
+      try { if (e.mesh) w.scene.remove(e.mesh); } catch (err) { /* scene */ }
+    }
+    w.enemies = [];
+  }
+
+  // Called by main.js when the CONTINUE button on the mission card is
+  // pressed. The index was already advanced by completeMission.
+  nextAfterComplete() {
+    if (this.isFinished()) return null;
+    return this.briefingFor(this.g.missionIndex);
+  }
+
+  completeMission(w) {
+    const j = this.jobs[w.missionIndex];
+    if (!j) return;
+    const reward = j.reward;
+    w.cash += reward; // reward and total read from the same ledger
     w.stats.missionsDone += 1;
     w.missionActive = false;
     w.missionDone = true;
+    w.missionTimer = 0;
+    this._current = j;
+    w.missionIndex += 1; // now points at the next job
     w.missionStep = 0;
-    w.missionIndex += 1;
-    w.beacon = null;
-    w.beaconTarget = null;
-    w.audio.missionComplete();
-    w.hud.showMessage(`${j.name} complete — $${j.reward} banked.`);
-    if (typeof w.showMissionCard === 'function') {
-      w.showMissionCard('MISSION COMPLETE', j.completeText, j.reward, total);
-    }
+    this.setBeacon(w, null);
+    try { w.hud.setObjective(''); } catch (err) { /* hud */ }
+    if (typeof w.onMissionComplete === 'function') w.onMissionComplete(reward, w.cash);
   }
 
-  endingStats(w) {
-    return `Missions complete: ${w.stats.missionsDone}/5  •  ` +
-      `Cash: $${w.cash}  •  Cars stolen: ${w.stats.carsStolen}`;
-  }
-
-  setFreeRoam(w) {
-    w.freeRoam = true;
-    w.missionActive = false;
-    w.beacon = null;
-    w.beaconTarget = null;
-    w.hud.setMissionName('Free Roam');
-    w.hud.setObjective('Neon Harbor is yours — take fares, run parcels, stay loose.');
+  failMission(w, reason) {
+    this.say(w, reason);
+    try { w.audio.fail(); } catch (err) { /* best-effort */ }
+    this.restartMission(w);
   }
 
   update(w, dt) {
-    if (w.missionIndex < this.jobs.length && !w.freeRoam) this.activate(w);
-    if (w.missionActive && w.mode === 'playing') {
-      const j = this.current(w);
-      if (j) {
-        // A step already satisfied advances at once, up to a few steps a tick.
-        for (let n = 0; n < 5; n++) {
-          const s = j.steps[w.missionStep];
-          if (!s) break;
-          let ok = false;
-          try { ok = !!s.check(w); } catch (err) { ok = false; }
-          if (!ok) break;
-          this.advanceStep(w);
-          if (!w.missionActive) break;
-        }
-      }
-    }
-    this.updateTaxi(w, dt);
-    this.updateCourier(w, dt);
-  }
-
-  // ------------------------------------------------------------ taxi job
-  updateTaxi(w, dt) {
-    const t = w.taxi;
-    if (!t || !w.freeRoam) return;
-    if (t.phase === 'none') {
-      this.taxiCooldown -= dt;
-      if (this.taxiCooldown > 0) return;
-      this.taxiCooldown = 3;
-      const client = this.findWalkerNear(w, TAXI_OFFER_RANGE);
-      if (!client) return;
-      t.client = client;
-      t.phase = 'wait';
-      t.waitTimer = TAXI_WAIT_SECONDS;
-      t.fare = 0;
-      t.dest = null;
-      markTaxiClient(w, client);
-      w.hud.showHint('Taxi fare waiting nearby — get a car and press T', 6);
+    // Side jobs run only in free roam, never during a story job.
+    if (!w.missionActive) {
+      this.updateTaxi(w, dt);
+      this.updateCourier(w, dt);
       return;
     }
+    const j = this.jobs[w.missionIndex];
+    if (!j) return;
+    const s = j.steps[w.missionStep];
+    if (!s) return;
+    if (!this._entered) {
+      this._entered = true;
+      if (s.timer) w.missionTimer = s.timer;
+      if (typeof s.onEnter === 'function') s.onEnter.call(this, w);
+    }
+    if (s.timer) {
+      w.missionTimer -= dt;
+      this.objective(w, `${s.text} — ${Math.max(0, Math.ceil(w.missionTimer))}s`);
+      if (w.missionTimer <= 0) {
+        this.failMission(w, 'Too slow — the job fell through. Starting over.');
+        return;
+      }
+    }
+    let done = false;
+    try { done = s.check(w); } catch (err) { done = false; }
+    if (!done) return;
+    w.missionStep += 1;
+    this._entered = false;
+    try { w.audio.chime(); } catch (err) { /* best-effort */ }
+    if (w.missionStep >= j.steps.length) {
+      this.completeMission(w);
+      return;
+    }
+    this.say(w, 'Step done — next: ' + j.steps[w.missionStep].text);
+    this.showStep(w);
+  }
+
+  // -- Free roam: pause the story without losing it -----------------------
+  setFreeRoam(w) {
+    w.missionActive = false;
+    w.freeRoam = true;
+    this.setBeacon(w, null);
+    try { w.hud.setMissionName('FREE ROAM'); } catch (err) { /* hud */ }
+    this.objective(w, 'Free roam — press T for a taxi fare, C for a courier parcel.');
+  }
+
+  cancelSideJobs(w) {
+    // Taxi: send the client away, drop the fare.
+    if (w.taxi) {
+      if (w.taxi.client) {
+        try { unmarkTaxiClient(w, w.taxi.client); } catch (err) { /* peds */ }
+      }
+      w.taxi.phase = 'none';
+      w.taxi.fare = 0;
+      w.taxi.client = null;
+      w.taxi.dest = null;
+      w.taxi.waitTimer = TAXI_WAIT;
+    }
+    // Courier: the parcel is gone.
+    if (w.courier) {
+      w.courier.phase = 'none';
+      w.courier.pay = 0;
+      w.courier.dest = null;
+      w.courier.timer = 0;
+      w.courier.client = null;
+    }
+    this._taxiCooldown = 6;
+    this.setBeacon(w, null);
+    // A timed story step restarts its countdown after a respawn.
+    if (w.missionActive) {
+      this._entered = false;
+      w.missionTimer = 0;
+    }
+  }
+
+  // -- Taxi side job ------------------------------------------------------
+  // A walker with a yellow diamond is waiting for a ride. Walk up in a
+  // car, press T, follow the beacon, collect a $40–$80 fare.
+  updateTaxi(w, dt) {
+    const t = w.taxi;
+    if (!t) return;
     if (t.phase === 'wait') {
       t.waitTimer -= dt;
-      if (!t.client || t.waitTimer <= 0) this.cancelTaxi(w, 'The fare gave up and walked off.');
+      if (t.waitTimer <= 0) {
+        if (t.client) {
+          try { unmarkTaxiClient(w, t.client); } catch (err) { /* peds */ }
+        }
+        t.phase = 'none';
+        t.client = null;
+        this._taxiCooldown = 6;
+      }
       return;
     }
     if (t.phase === 'ride') {
-      if (!t.dest) return;
-      const m = w.markers[t.dest.key];
-      if (!m) return;
-      if (w.player.car && dist2D(w.player.pos.x, w.player.pos.z, m.x, m.z) < 8) {
-        const fare = t.fare;
-        w.cash += fare;
-        w.audio.cash();
-        w.hud.showMessage(`Fare paid: $${fare}. Nice driving.`);
-        w.beacon = null;
-        w.beaconTarget = null;
+      // Bail out of the car mid-fare and the fare is gone.
+      if (!w.player.car) {
         t.phase = 'none';
-        t.client = null;
-        t.dest = null;
         t.fare = 0;
-        this.taxiCooldown = 4;
+        t.dest = null;
+        this.setBeacon(w, null);
+        this.say(w, 'Fare cancelled — you left the car.');
+        this._taxiCooldown = 8;
+        return;
       }
+      if (t.dest) {
+        const m = w.markers[t.dest.key];
+        if (m && dist2D(w.player.pos.x, w.player.pos.z, m.x, m.z) < NEAR) {
+          const fare = t.fare;
+          w.cash += fare;
+          try { w.audio.cash(); } catch (err) { /* best-effort */ }
+          this.say(w, `Fare paid — $${fare}.`);
+          t.phase = 'none';
+          t.fare = 0;
+          t.dest = null;
+          this.setBeacon(w, null);
+          this._taxiCooldown = randInt(8, 16);
+        }
+      }
+      return;
     }
-  }
-
-  findWalkerNear(w, range) {
+    // No offer yet: wait for the cooldown, then flag a nearby walker.
+    if (t.phase !== 'none') return;
+    this._taxiCooldown -= dt;
+    if (this._taxiCooldown > 0) return;
+    const p = w.player.pos;
     let best = null;
-    let bd = Infinity;
-    for (const p of w.peds) {
-      if (p.state !== 'walk') continue;
-      const d = dist2D(p.pos.x, p.pos.z, w.player.pos.x, w.player.pos.z);
-      if (d < range && d < bd) { bd = d; best = p; }
+    let bestD = 120;
+    for (const ped of w.peds) {
+      if (ped.state !== 'walk') continue;
+      const d = dist2D(ped.pos.x, ped.pos.z, p.x, p.z);
+      if (d < bestD) { bestD = d; best = ped; }
     }
-    return best;
+    if (!best) {
+      this._taxiCooldown = 4;
+      return;
+    }
+    try { markTaxiClient(w, best); } catch (err) { /* peds */ }
+    t.client = best;
+    t.phase = 'wait';
+    t.waitTimer = TAXI_WAIT;
+    t.fare = 0;
+    t.dest = null;
   }
 
-  tryTaxiPickup(w) {
+  taxiAction(w) {
     const t = w.taxi;
     if (!t || t.phase !== 'wait' || !t.client) return;
     if (!w.player.car) {
-      w.hud.showMessage('You need a car to take the fare.');
+      this.say(w, 'You need a car to pick up a fare.');
       return;
     }
     const c = t.client;
-    if (dist2D(w.player.pos.x, w.player.pos.z, c.pos.x, c.pos.z) > TAXI_PICKUP_RANGE) {
-      w.hud.showMessage('Get closer to the fare first.');
+    if (dist2D(w.player.pos.x, w.player.pos.z, c.pos.x, c.pos.z) > TAXI_PICKUP) {
+      this.say(w, 'Get closer to the waiting passenger.');
       return;
     }
-    unmarkTaxiClient(w, c);
-    const destKey = pick(MARKER_KEYS.filter((k) => w.markers[k]));
-    t.dest = { key: destKey };
-    t.fare = 40 + randInt(0, 40);
-    t.phase = 'ride';
-    const m = w.markers[destKey];
-    w.beaconTarget = m;
-    w.beacon = m;
-    w.hud.showMessage(`Fare: $${t.fare} — take them to ${destKey}. Follow the beacon.`);
-    w.audio.chime();
-  }
-
-  cancelTaxi(w, message) {
-    const t = w.taxi;
-    if (!t) return;
-    if (t.client) {
-      try { unmarkTaxiClient(w, t.client); } catch (err) { /* already gone */ }
+    // Pick a destination far enough to be a real ride.
+    let destKey = null;
+    for (let tries = 0; tries < 8 && !destKey; tries++) {
+      const key = pick(FARE_MARKERS);
+      const m = w.markers[key];
+      if (m && dist2D(c.pos.x, c.pos.z, m.x, m.z) > 40) destKey = key;
     }
-    t.phase = 'none';
+    if (!destKey) destKey = pick(FARE_MARKERS);
+    t.fare = randInt(TAXI_FARE_MIN, TAXI_FARE_MAX);
+    t.dest = { key: destKey };
+    t.phase = 'ride';
+    this.setBeacon(w, destKey);
+    // The client gets in: take them off the street.
+    try {
+      if (c.mesh) w.scene.remove(c.mesh);
+      if (c.marker) w.scene.remove(c.marker);
+    } catch (err) { /* scene */ }
+    const at = w.peds.indexOf(c);
+    if (at !== -1) w.peds.splice(at, 1);
     t.client = null;
-    t.dest = null;
-    t.fare = 0;
-    if (message) w.hud.showMessage(message);
+    this.objective(w, `Taxi fare $${t.fare} — drop them at ${destKey}.`);
+    this.say(w, `Passenger aboard — $${t.fare} to ${destKey}. Follow the beacon.`);
   }
 
-  // --------------------------------------------------------- courier job
-  courierNear(w) {
-    const c = w.courier;
-    return !!c && c.phase === 'none' && !w.player.car &&
-      nearMarker(w, 'docks', COURIER_TAKE_RANGE);
-  }
-
-  tryCourierTake(w) {
-    const c = w.courier;
-    if (!c || !this.courierNear(w)) return;
-    const destKey = pick(MARKER_KEYS.filter((k) => k !== 'docks' && w.markers[k]));
-    const dest = w.markers[destKey];
+  // -- Courier side job ---------------------------------------------------
+  // A dispatcher waits at the docks with a green diamond. Walk up on
+  // foot, press C, run the parcel to the beacon within 90 seconds.
+  // Pay $60–$120, scaled by the distance.
+  dispatcher(w) {
+    if (this._dispatcher) return this._dispatcher;
     const docks = w.markers.docks;
-    const dist = dist2D(docks.x, docks.z, dest.x, dest.z);
-    c.pay = clamp(60 + Math.round(dist / 6), 60, 120);
-    c.dest = { key: destKey };
-    c.phase = 'carry';
-    c.timeLeft = COURIER_TIME_LIMIT;
-    w.beaconTarget = dest;
-    w.beacon = dest;
-    w.missionTimer = COURIER_TIME_LIMIT;
-    w.hud.showMessage(`Parcel taken — ${destKey} in 90 seconds, pays $${c.pay}.`);
-    w.audio.chime();
+    if (!docks || !w.scene) return null;
+    const group = new THREE.Group();
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x2e8b6a });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.55, 1.05, 0.32), bodyMat);
+    body.position.y = 0.85;
+    const head = new THREE.Mesh(
+      new THREE.BoxGeometry(0.34, 0.34, 0.34),
+      new THREE.MeshStandardMaterial({ color: 0xd9a066 }),
+    );
+    head.position.y = 1.6;
+    const cap = new THREE.Mesh(
+      new THREE.BoxGeometry(0.4, 0.12, 0.4),
+      new THREE.MeshStandardMaterial({ color: 0x1d5c46 }),
+    );
+    cap.position.y = 1.8;
+    const diamond = new THREE.Mesh(
+      new THREE.OctahedronGeometry(0.55),
+      new THREE.MeshBasicMaterial({ color: 0x2bff7a }),
+    );
+    diamond.position.y = 2.5;
+    group.add(body, head, cap, diamond);
+    group.position.set(docks.x + 20, 0, docks.z + 2);
+    w.scene.add(group);
+    this._dispatcher = { group, diamond, x: docks.x + 20, z: docks.z + 2 };
+    return this._dispatcher;
   }
 
   updateCourier(w, dt) {
     const c = w.courier;
-    if (!c || c.phase !== 'carry' || !c.dest) return;
-    c.timeLeft -= dt;
-    w.missionTimer = Math.max(0, c.timeLeft);
-    if (c.timeLeft <= 0) {
+    if (!c) return;
+    const d = this.dispatcher(w);
+    if (d) {
+      d.diamond.rotation.y += dt * 2;
+      d.diamond.position.y = 2.5 + Math.sin(w.time * 2) * 0.15;
+    }
+    if (c.phase !== 'deliver') return;
+    c.timer -= dt;
+    const dest = c.dest ? w.markers[c.dest.key] : null;
+    if (c.timer <= 0) {
       c.phase = 'none';
-      c.dest = null;
       c.pay = 0;
-      w.beacon = null;
-      w.beaconTarget = null;
-      w.missionTimer = 0;
-      w.hud.showMessage('Courier run failed — the parcel went to someone else.');
+      c.dest = null;
+      this.setBeacon(w, null);
+      this.say(w, 'Too slow — the parcel run expired.');
       return;
     }
-    const m = w.markers[c.dest.key];
-    if (m && dist2D(w.player.pos.x, w.player.pos.z, m.x, m.z) < 8) {
+    if (dest && dist2D(w.player.pos.x, w.player.pos.z, dest.x, dest.z) < NEAR) {
       const pay = c.pay;
       w.cash += pay;
-      w.audio.cash();
-      w.hud.showMessage(`Parcel delivered — $${pay} earned.`);
+      try { w.audio.cash(); } catch (err) { /* best-effort */ }
+      this.say(w, `Parcel delivered — $${pay}.`);
       c.phase = 'none';
-      c.dest = null;
       c.pay = 0;
-      w.beacon = null;
-      w.beaconTarget = null;
-      w.missionTimer = 0;
+      c.dest = null;
+      this.setBeacon(w, null);
     }
   }
 
-  cancelCourier(w) {
+  courierAction(w) {
     const c = w.courier;
     if (!c) return;
-    c.phase = 'none';
-    c.dest = null;
-    c.pay = 0;
-    c.timeLeft = 0;
-    w.missionTimer = 0;
-  }
-
-  cancelSideJobs(w) {
-    this.cancelTaxi(w);
-    this.cancelCourier(w);
-    w.beacon = null;
-    w.beaconTarget = null;
-  }
-
-  // ------------------------------------------------------------ bank van
-  tagBankVan(w) {
-    let best = null;
-    let bd = Infinity;
-    for (const c of w.cars) {
-      if (c.isPolice || c.parked === false) continue;
-      const d = dist2D(c.pos.x, c.pos.z, w.markers.bank.x, w.markers.bank.z);
-      if (c.isVan && d < bd) { bd = d; best = c; }
+    if (w.missionActive) return; // never blocks a story job
+    if (c.phase === 'deliver') {
+      this.say(w, 'Already carrying a parcel — follow the beacon.');
+      return;
     }
-    if (!best) {
-      for (const c of w.cars) {
-        if (c.isPolice) continue;
-        const d = dist2D(c.pos.x, c.pos.z, w.markers.bank.x, w.markers.bank.z);
-        if (d < bd) { bd = d; best = c; }
-      }
+    const d = this.dispatcher(w);
+    if (!d) return;
+    if (w.player.car) {
+      this.say(w, 'Get out of the car to take a parcel.');
+      return;
     }
-    if (best) {
-      best.name = 'Bank Van';
-      best.special = 'bankvan';
-      this.bankVan = best;
-    } else {
-      this.bankVan = null;
+    if (dist2D(w.player.pos.x, w.player.pos.z, d.x, d.z) > COURIER_PICKUP) {
+      this.say(w, 'Find the dispatcher at the docks — look for the green diamond.');
+      return;
     }
+    let destKey = null;
+    for (let tries = 0; tries < 8 && !destKey; tries++) {
+      const key = pick(FARE_MARKERS);
+      const m = w.markers[key];
+      if (m && key !== 'docks' && dist2D(d.x, d.z, m.x, m.z) > 40) destKey = key;
+    }
+    if (!destKey) destKey = 'hideout';
+    const dest = w.markers[destKey];
+    const run = dist2D(d.x, d.z, dest.x, dest.z);
+    c.pay = Math.max(COURIER_PAY_MIN, Math.min(COURIER_PAY_MAX, 60 + Math.round(run * 0.25)));
+    c.dest = { key: destKey };
+    c.timer = COURIER_TIME;
+    c.phase = 'deliver';
+    this.setBeacon(w, destKey);
+    this.objective(w, `Courier parcel $${c.pay} — deliver to ${destKey} in ${COURIER_TIME}s.`);
+    this.say(w, `Parcel taken — $${c.pay} if it reaches ${destKey} in ${COURIER_TIME} seconds.`);
   }
 }

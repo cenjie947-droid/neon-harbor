@@ -1,396 +1,540 @@
-// Neon Harbor — fists, pistol and the armed gang members who shoot back.
+// Neon Harbor — combat: fists, pistol, and Venn's armed crew.
 //
-// Cole fights on foot. A punch is a short, wide swing in front of him;
-// the pistol is a hitscan shot down his facing. Gang enemies close in,
-// stop at range and fire. A dropped gunman sometimes leaves a pistol
-// pickup behind. Everything here is plain boxes and bursts — no models.
+// Cole fights two ways. His fists are always with him: a click swings a
+// visible arc in front of him, and anything close enough in that cone
+// takes the hit. The pistol needs ammo, fires a tracer down the aim line,
+// and is the only sane answer to the gunmen Dario Venn sends. Gunmen
+// close in on foot, plant themselves at firing range, and shoot back;
+// dropping one sometimes leaves a pistol pickup on the ground.
+//
+// This module owns no input and no keys. main.js calls attack() for a
+// mouse click with fists out, shoot() for a click with the pistol out,
+// and spawnEnemy() when a mission stages an ambush. update() runs every
+// frame while the world is playing.
 import * as THREE from 'three';
-import { clamp, dist2D, rand, vec3 } from './state.js';
-import { damagePlayer } from './player.js';
-import { scarePedestrians } from './pedestrians.js';
 
-const PUNCH_REACH = 2.4;
-const PUNCH_ARC = 0.55; // cosine of the half-angle of the swing
-const PUNCH_DAMAGE = 34;
-const PUNCH_COOLDOWN = 0.45;
-const SHOT_RANGE = 46;
-const SHOT_ARC = 0.93; // cosine of the half-angle of the aim cone
-const SHOT_DAMAGE = 34;
-const SHOT_COOLDOWN = 0.32;
-const ENEMY_HEALTH = 60;
-const ENEMY_SPEED = 3.4;
-const ENEMY_STOP = 7; // stand off and shoot from here
-const ENEMY_FIRE_EVERY = 1.9;
+const PUNCH_RANGE = 2.4;
+const PUNCH_ARC = 1.1; // half-angle of the swing cone, radians
+const PUNCH_DAMAGE = 12;
+const PUNCH_COOLDOWN = 0.38;
+const GUN_RANGE = 46;
+const GUN_DAMAGE = 34;
+const GUN_COOLDOWN = 0.42;
+const ENEMY_HEALTH = 50;
+const ENEMY_SPEED = 3.6;
+const ENEMY_FIRE_RANGE = 19;
+const ENEMY_HOLD_RANGE = 12;
 const ENEMY_SHOT_DAMAGE = 7;
-const PICKUP_RADIUS = 1.6;
+const DROP_CHANCE = 0.45;
+const PICKUP_RADIUS = 2.2;
 
-// Forward on the ground plane for a heading. The whole game agrees that
-// heading 0 faces +z and heading grows toward +x: forward = (sin h, cos h).
+function angleTo(ax, az, bx, bz) {
+  return Math.atan2(bx - ax, bz - az);
+}
+
+function wrapAngle(a) {
+  while (a > Math.PI) a -= Math.PI * 2;
+  while (a < -Math.PI) a += Math.PI * 2;
+  return a;
+}
+
 function forwardOf(heading) {
   return { x: Math.sin(heading), z: Math.cos(heading) };
 }
 
-// Is a point inside the cone in front of the player?
-function inFront(px, pz, heading, tx, tz, reach, cosLimit) {
-  const dx = tx - px;
-  const dz = tz - pz;
-  const d = Math.hypot(dx, dz);
-  if (d > reach || d < 0.001) return d < 0.001 ? true : false;
-  const f = forwardOf(heading);
-  return (dx * f.x + dz * f.z) / d >= cosLimit;
+// A short-lived swing arc. main.js reads combat.arcs every frame, and
+// the test driver counts arcs to prove a punch really happened.
+class SwingArc {
+  constructor(scene, origin, heading) {
+    const geo = new THREE.TorusGeometry(1.25, 0.09, 8, 18, Math.PI * 0.95);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xfff2c0,
+      transparent: true,
+      opacity: 0.95,
+    });
+    this.mesh = new THREE.Mesh(geo, mat);
+    const f = forwardOf(heading);
+    this.mesh.position.set(origin.x + f.x * 1.1, 1.25, origin.z + f.z * 1.1);
+    this.mesh.rotation.order = 'YXZ';
+    this.mesh.rotation.y = heading;
+    this.mesh.rotation.x = Math.PI / 2;
+    this.life = 0.28;
+    this.maxLife = 0.28;
+    scene.add(this.mesh);
+  }
+
+  step(dt) {
+    this.life -= dt;
+    const k = Math.max(0, this.life / this.maxLife);
+    this.mesh.material.opacity = 0.95 * k;
+    const s = 1 + (1 - k) * 0.35;
+    this.mesh.scale.set(s, s, s);
+    return this.life > 0;
+  }
+
+  dispose(scene) {
+    scene.remove(this.mesh);
+    this.mesh.geometry.dispose();
+    this.mesh.material.dispose();
+  }
 }
 
-function makeEnemyMesh() {
-  const group = new THREE.Group();
-  const jacket = new THREE.MeshStandardMaterial({ color: 0x8a1f1f });
-  const dark = new THREE.MeshStandardMaterial({ color: 0x1c1c22 });
-  const skin = new THREE.MeshStandardMaterial({ color: 0xc9976b });
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.72, 0.34), jacket);
-  torso.position.y = 1.18;
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.34, 0.32), skin);
-  head.position.y = 1.72;
-  const cap = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.1, 0.36), dark);
-  cap.position.y = 1.92;
-  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.78, 0.24), dark);
-  legL.position.set(-0.16, 0.39, 0);
-  const legR = legL.clone();
-  legR.position.x = 0.16;
-  const armL = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.62, 0.2), jacket);
-  armL.position.set(-0.42, 1.2, 0);
-  const armR = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.62, 0.2), jacket);
-  armR.position.set(0.42, 1.2, 0.1);
-  armR.rotation.x = -1.1; // gun arm held out level
-  const gun = new THREE.Mesh(
-    new THREE.BoxGeometry(0.07, 0.1, 0.42),
-    new THREE.MeshStandardMaterial({ color: 0x111114 })
-  );
-  gun.position.set(0.42, 1.18, 0.42);
-  group.add(torso, head, cap, legL, legR, armL, armR, gun);
-  group.traverse((m) => { if (m.isMesh) m.castShadow = true; });
-  return { group, legL, legR, armR };
-}
+// One of Venn's gunmen: dark suit, visible pistol, no face you would
+// recognise. He walks toward Cole until he is close enough to shoot,
+// then plants his feet and fires in bursts.
+class Gunman {
+  constructor(scene, x, z) {
+    this.pos = new THREE.Vector3(x, 0, z);
+    this.heading = Math.random() * Math.PI * 2;
+    this.health = ENEMY_HEALTH;
+    this.state = 'chase';
+    this.fireTimer = 1.2 + Math.random() * 0.8;
+    this.burstLeft = 0;
+    this.burstGap = 0;
+    this.strafeDir = Math.random() < 0.5 ? 1 : -1;
+    this.strafeTimer = 2 + Math.random() * 2;
+    this.flashTimer = 0;
+    this.mesh = this.buildMesh();
+    this.mesh.position.set(x, 0, z);
+    scene.add(this.mesh);
+  }
 
-function makePickupMesh() {
-  const group = new THREE.Group();
-  const body = new THREE.Mesh(
-    new THREE.BoxGeometry(0.1, 0.14, 0.44),
-    new THREE.MeshStandardMaterial({ color: 0x222226, metalness: 0.6, roughness: 0.4 })
-  );
-  const glow = new THREE.Mesh(
-    new THREE.BoxGeometry(0.5, 0.06, 0.5),
-    new THREE.MeshBasicMaterial({ color: 0xffd23e })
-  );
-  glow.position.y = -0.45;
-  group.add(body, glow);
-  return group;
+  buildMesh() {
+    const group = new THREE.Group();
+    const suit = new THREE.MeshLambertMaterial({ color: 0x1c1c22 });
+    const skin = new THREE.MeshLambertMaterial({ color: 0xc9976b });
+    const shirt = new THREE.MeshLambertMaterial({ color: 0x8f1d1d });
+    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.78, 0.34), suit);
+    torso.position.y = 1.18;
+    group.add(torso);
+    const shirtFront = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.6, 0.05), shirt);
+    shirtFront.position.set(0, 1.2, 0.19);
+    group.add(shirtFront);
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.36, 0.32), skin);
+    head.position.y = 1.78;
+    group.add(head);
+    const hat = new THREE.Mesh(
+      new THREE.BoxGeometry(0.44, 0.09, 0.44),
+      new THREE.MeshLambertMaterial({ color: 0x111114 }),
+    );
+    hat.position.y = 1.99;
+    group.add(hat);
+    const legMat = new THREE.MeshLambertMaterial({ color: 0x141416 });
+    const legL = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.8, 0.26), legMat);
+    legL.position.set(-0.16, 0.4, 0);
+    group.add(legL);
+    const legR = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.8, 0.26), legMat);
+    legR.position.set(0.16, 0.4, 0);
+    group.add(legR);
+    const armL = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.62, 0.2), suit);
+    armL.position.set(-0.42, 1.2, 0);
+    group.add(armL);
+    this.armR = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.62, 0.2), suit);
+    this.armR.position.set(0.42, 1.2, 0.14);
+    this.armR.rotation.x = -1.1;
+    group.add(this.armR);
+    this.gun = new THREE.Mesh(
+      new THREE.BoxGeometry(0.08, 0.1, 0.42),
+      new THREE.MeshLambertMaterial({ color: 0x0a0a0c }),
+    );
+    this.gun.position.set(0.42, 1.32, 0.42);
+    group.add(this.gun);
+    return group;
+  }
+
+  // Walk toward a point, sliding around buildings instead of through
+  // them when the world offers a collision helper.
+  walkToward(w, tx, tz, speed, dt) {
+    const dx = tx - this.pos.x;
+    const dz = tz - this.pos.z;
+    const d = Math.hypot(dx, dz) || 1;
+    const nx = this.pos.x + (dx / d) * speed * dt;
+    const nz = this.pos.z + (dz / d) * speed * dt;
+    if (typeof w.collideCircle === 'function') {
+      const solved = w.collideCircle(nx, nz, 0.5);
+      this.pos.x = solved.x;
+      this.pos.z = solved.z;
+    } else {
+      this.pos.x = nx;
+      this.pos.z = nz;
+    }
+    this.heading = angleTo(this.pos.x, this.pos.z, tx, tz);
+    this.mesh.position.set(this.pos.x, 0, this.pos.z);
+    this.mesh.rotation.y = this.heading;
+  }
 }
 
 export class Combat {
   constructor(game) {
     this.game = game;
-    // Swing arcs the main loop can read (the driver counts them). Each
-    // entry is a live torus mesh in front of the player that fades out.
     this.arcs = [];
-    // Tracers for pistol shots, same idea: short-lived scene lines.
-    this.tracers = [];
-    // Weapon pickups dropped by gunmen, lying on the ground.
+    this.enemies = [];
     this.pickups = [];
-    this.punchCooldown = 0;
-    this.shootCooldown = 0;
-    // Enemies live on the shared game object so missions and the police
-    // can see them too; this class owns their behaviour.
-    if (!game.enemies) game.enemies = [];
-    this.enemies = game.enemies;
+    this.punchTimer = 0;
+    this.punchAnim = 0;
   }
 
-  // -- spawning -----------------------------------------------------------
+  // The state object the main loop passes in each frame; fall back to
+  // whatever the constructor was handed.
+  state(w) {
+    return w ?? this.game;
+  }
 
-  spawnEnemy(w, x, z) {
-    const built = makeEnemyMesh();
-    const enemy = {
-      pos: vec3(x, 0, z),
-      heading: rand(0, Math.PI * 2),
-      health: ENEMY_HEALTH,
-      maxHealth: ENEMY_HEALTH,
-      speed: ENEMY_SPEED,
-      mesh: built.group,
-      legL: built.legL,
-      legR: built.legR,
-      armR: built.armR,
-      fireTimer: rand(0.8, 1.6),
-      walkPhase: rand(0, Math.PI * 2),
-      dead: false,
+  sceneOf(w) {
+    const s = this.state(w);
+    return s.scene ?? s.G?.scene ?? null;
+  }
+
+  playerOf(w) {
+    const s = this.state(w);
+    return s.player ?? s.G?.player ?? null;
+  }
+
+  hudOf(w) {
+    const s = this.state(w);
+    return s.hud ?? s.G?.hud ?? null;
+  }
+
+  audioOf(w) {
+    const s = this.state(w);
+    return s.audio ?? s.G?.audio ?? null;
+  }
+
+  fxOf(w) {
+    const s = this.state(w);
+    return s.fx ?? s.G?.fx ?? null;
+  }
+
+  // -- fists ------------------------------------------------------------
+  attack(w) {
+    const s = this.state(w);
+    const hero = this.playerOf(w);
+    if (!hero || !s) return false;
+    if (this.punchTimer > 0) return false;
+    if (hero.car) return false; // no punching from the driver's seat
+    this.punchTimer = PUNCH_COOLDOWN;
+    this.punchAnim = 1;
+    hero.punchAnim = 1;
+    const scene = this.sceneOf(w);
+    if (scene) this.arcs.push(new SwingArc(scene, hero.pos, hero.heading));
+    const audio = this.audioOf(w);
+    audio?.punch?.();
+    const hit = this.punchHit(s, hero);
+    const hud = this.hudOf(w);
+    if (hit) {
+      hud?.showMessage?.('Punch landed!');
+    } else {
+      hud?.showMessage?.('You swing at thin air.');
+    }
+    return hit;
+  }
+
+  // Find the closest thing inside the swing cone and hurt it. Returns
+  // true when something connected, so the caller can say so on screen.
+  punchHit(s, hero) {
+    const f = forwardOf(hero.heading);
+    const px = hero.pos.x + f.x * 1.4;
+    const pz = hero.pos.z + f.z * 1.4;
+    let best = null;
+    let bestD = PUNCH_RANGE;
+    const consider = (target, x, z, kind) => {
+      const d = Math.hypot(x - px, z - pz);
+      if (d > bestD) return;
+      const ang = Math.abs(wrapAngle(Math.atan2(x - hero.pos.x, z - hero.pos.z) - hero.heading));
+      if (ang > PUNCH_ARC) return;
+      best = { target, kind };
+      bestD = d;
     };
-    built.group.position.set(x, 0, z);
-    w.scene.add(built.group);
+    for (const e of this.enemies) consider(e, e.pos.x, e.pos.z, 'enemy');
+    for (const p of s.peds ?? []) {
+      if (p.state === 'down') continue;
+      consider(p, p.pos.x, p.pos.z, 'ped');
+    }
+    for (const o of s.officers ?? []) consider(o, o.pos.x, o.pos.z, 'officer');
+    if (!best) return false;
+    const fx = this.fxOf(s);
+    const at = best.target.pos;
+    fx?.burst?.(at.x, 1.3, at.z, 0xffd75e, 10);
+    if (best.kind === 'enemy') {
+      this.damageEnemy(s, best.target, PUNCH_DAMAGE);
+    } else if (best.kind === 'ped') {
+      best.target.state = 'flee';
+      best.target.fleeTimer = 3;
+      best.target.fleeX = best.target.pos.x - hero.pos.x;
+      best.target.fleeZ = best.target.pos.z - hero.pos.z;
+      if (typeof s.scarePedestrians === 'function') s.scarePedestrians(s, hero.pos.x, hero.pos.z);
+      s.police?.addWanted?.(s, 1, 'assault');
+    } else {
+      best.target.health = (best.target.health ?? 100) - PUNCH_DAMAGE;
+      s.police?.addWanted?.(s, 1, 'assault-officer');
+    }
+    return true;
+  }
+
+  // -- pistol -----------------------------------------------------------
+  shoot(w) {
+    const s = this.state(w);
+    const hero = this.playerOf(w);
+    if (!hero || !s) return false;
+    if (hero.weapon !== 'pistol') return this.attack(w);
+    if (hero.car) return false;
+    if ((hero.shootCooldown ?? 0) > 0) return false;
+    if ((hero.ammo ?? 0) <= 0) {
+      this.audioOf(w)?.click?.();
+      this.hudOf(w)?.showMessage?.('Out of ammo — look for a dropped pistol.');
+      return false;
+    }
+    hero.shootCooldown = GUN_COOLDOWN;
+    hero.ammo -= 1;
+    const fx = this.fxOf(w);
+    const f = forwardOf(hero.heading);
+    const ox = hero.pos.x + f.x * 0.6;
+    const oy = 1.45;
+    const oz = hero.pos.z + f.z * 0.6;
+    fx?.muzzle?.(ox, oy, oz);
+    this.audioOf(w)?.gunshot?.();
+    // Find the closest hittable thing down the aim line.
+    let best = null;
+    let bestD = GUN_RANGE;
+    const consider = (target, x, z, kind) => {
+      const dx = x - hero.pos.x;
+      const dz = z - hero.pos.z;
+      const along = dx * f.x + dz * f.z;
+      if (along < 1 || along > bestD) return;
+      const lateral = Math.abs(dx * f.z - dz * f.x);
+      if (lateral > 1.1 + along * 0.02) return;
+      best = { target, kind, along };
+      bestD = along;
+    };
+    for (const e of this.enemies) consider(e, e.pos.x, e.pos.z, 'enemy');
+    for (const p of s.peds ?? []) {
+      if (p.state === 'down') continue;
+      consider(p, p.pos.x, p.pos.z, 'ped');
+    }
+    for (const o of s.officers ?? []) consider(o, o.pos.x, o.pos.z, 'officer');
+    for (const c of s.policeCars ?? []) consider(c, c.pos.x, c.pos.z, 'cruiser');
+    const ex = hero.pos.x + f.x * bestD;
+    const ez = hero.pos.z + f.z * bestD;
+    fx?.tracer?.(ox, oy, oz, ex, 1.2, ez);
+    if (!best) return true;
+    fx?.burst?.(best.target.pos.x, 1.3, best.target.pos.z, 0xff5a3c, 8);
+    if (best.kind === 'enemy') {
+      this.damageEnemy(s, best.target, GUN_DAMAGE);
+    } else if (best.kind === 'ped') {
+      best.target.state = 'down';
+      s.police?.addWanted?.(s, 2, 'shooting');
+    } else if (best.kind === 'officer') {
+      best.target.health = (best.target.health ?? 100) - GUN_DAMAGE;
+      s.police?.addWanted?.(s, 2, 'shooting-officer');
+    } else if (best.kind === 'cruiser') {
+      best.target.health = (best.target.health ?? 100) - GUN_DAMAGE;
+    }
+    return true;
+  }
+
+  damageEnemy(s, enemy, dmg) {
+    enemy.health -= dmg;
+    enemy.flashTimer = 0.12;
+    if (enemy.health > 0) return;
+    this.killEnemy(s, enemy);
+  }
+
+  killEnemy(s, enemy) {
+    const i = this.enemies.indexOf(enemy);
+    if (i !== -1) this.enemies.splice(i, 1);
+    const scene = this.sceneOf(s);
+    if (scene) scene.remove(enemy.mesh);
+    this.fxOf(s)?.burst?.(enemy.pos.x, 1.2, enemy.pos.z, 0xffd75e, 16);
+    this.audioOf(s)?.cash?.();
+    if (Math.random() < DROP_CHANCE) this.dropPickup(s, enemy.pos.x, enemy.pos.z);
+  }
+
+  // -- pickups ----------------------------------------------------------
+  dropPickup(s, x, z) {
+    const scene = this.sceneOf(s);
+    if (!scene) return;
+    const group = new THREE.Group();
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(0.34, 0.1, 0.16),
+      new THREE.MeshLambertMaterial({ color: 0x222226 }),
+    );
+    body.position.y = 0.12;
+    group.add(body);
+    const glow = new THREE.Mesh(
+      new THREE.BoxGeometry(0.5, 0.04, 0.3),
+      new THREE.MeshBasicMaterial({ color: 0xffd75e, transparent: true, opacity: 0.55 }),
+    );
+    glow.position.y = 0.05;
+    group.add(glow);
+    group.position.set(x, 0, z);
+    scene.add(group);
+    const pickup = { kind: 'pistol', ammo: 12, pos: new THREE.Vector3(x, 0, z), mesh: group, life: 60 };
+    this.pickups.push(pickup);
+    if (Array.isArray(s.pickups)) s.pickups.push(pickup);
+  }
+
+  collectPickups(s, hero) {
+    for (let i = this.pickups.length - 1; i >= 0; i--) {
+      const p = this.pickups[i];
+      p.life -= 1 / 60;
+      if (p.life <= 0) {
+        this.removePickup(s, i);
+        continue;
+      }
+      const d = Math.hypot(p.pos.x - hero.pos.x, p.pos.z - hero.pos.z);
+      if (d > PICKUP_RADIUS) continue;
+      hero.weapon = 'pistol';
+      hero.hasPistol = true;
+      hero.ammo = (hero.ammo ?? 0) + p.ammo;
+      this.removePickup(s, i);
+      this.hudOf(s)?.showMessage?.(`Picked up a pistol (+${p.ammo} rounds). Press Q to switch.`);
+      this.hudOf(s)?.renderWeapon?.(hero);
+      this.audioOf(s)?.chime?.();
+    }
+  }
+
+  removePickup(s, i) {
+    const p = this.pickups[i];
+    this.pickups.splice(i, 1);
+    const scene = this.sceneOf(s);
+    if (scene && p.mesh) scene.remove(p.mesh);
+    if (Array.isArray(s.pickups)) {
+      const j = s.pickups.indexOf(p);
+      if (j !== -1) s.pickups.splice(j, 1);
+    }
+  }
+
+  // -- enemies ----------------------------------------------------------
+  spawnEnemy(w, x, z) {
+    const s = this.state(w);
+    const scene = this.sceneOf(w);
+    if (!s || !scene) return null;
+    const enemy = new Gunman(scene, x, z);
     this.enemies.push(enemy);
-    if (w.hud) w.hud.showMessage('Armed gunman — Dario\'s crew!');
+    if (Array.isArray(s.enemies)) s.enemies.push(enemy);
+    else s.enemies = this.enemies;
     return enemy;
   }
 
-  dropPickup(w, x, z) {
-    const mesh = makePickupMesh();
-    mesh.position.set(x, 0.6, z);
-    w.scene.add(mesh);
-    this.pickups.push({ pos: vec3(x, 0, z), mesh, bob: rand(0, Math.PI * 2) });
+  clearEnemies(w) {
+    const scene = this.sceneOf(w);
+    for (const e of this.enemies) if (scene) scene.remove(e.mesh);
+    this.enemies.length = 0;
+    const s = this.state(w);
+    if (s && Array.isArray(s.enemies)) s.enemies.length = 0;
   }
 
-  // -- the punch ----------------------------------------------------------
-
-  attack(w) {
-    const p = w.player;
-    if (!p || p.car || w.mode !== 'playing') return;
-    if (this.punchCooldown > 0) return;
-    this.punchCooldown = PUNCH_COOLDOWN;
-    p.punchAnim = 1;
-    if (w.audio) w.audio.punch();
-    this.spawnArc(w);
-    const px = p.pos.x;
-    const pz = p.pos.z;
-    const h = p.heading;
-
-    // Gang enemies take the hit first — they are the real threat.
-    for (const e of [...this.enemies]) {
-      if (e.dead) continue;
-      if (inFront(px, pz, h, e.pos.x, e.pos.z, PUNCH_REACH, PUNCH_ARC)) {
-        this.hitEnemy(w, e, PUNCH_DAMAGE, 'Punch landed!');
-        return;
-      }
-    }
-    // A foot officer can be shoved off his grab: the bust timer resets
-    // and he stumbles back, which buys Cole a few seconds.
-    for (const o of w.officers || []) {
-      if (inFront(px, pz, h, o.pos.x, o.pos.z, PUNCH_REACH, PUNCH_ARC)) {
-        const dx = o.pos.x - px;
-        const dz = o.pos.z - pz;
-        const d = Math.hypot(dx, dz) || 1;
-        o.pos.x = clamp(o.pos.x + (dx / d) * 2.5, -235, 235);
-        o.pos.z = clamp(o.pos.z + (dz / d) * 2.5, -235, 235);
-        o.grabTimer = 0;
-        this.hitSpark(w, o.pos.x, 1.3, o.pos.z);
-        if (w.hud) w.hud.showMessage('Punch landed! The officer staggers back.');
-        return;
-      }
-    }
-    // A walker just gets scared and runs.
-    for (const ped of w.peds || []) {
-      if (inFront(px, pz, h, ped.pos.x, ped.pos.z, PUNCH_REACH, PUNCH_ARC)) {
-        scarePedestrians(w, ped.pos.x, ped.pos.z, 6);
-        if (w.hud) w.hud.showMessage('Punch landed! The pedestrian flees.');
-        return;
-      }
-    }
-    // Nothing in reach: say so on screen, so a swing is never silent.
-    if (w.hud) w.hud.showMessage('You swing at the air.');
-  }
-
-  spawnArc(w) {
-    const p = w.player;
-    const geo = new THREE.TorusGeometry(1.15, 0.06, 6, 14, Math.PI * 0.95);
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0xfff2c0, transparent: true, opacity: 0.95,
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    const f = forwardOf(p.heading);
-    mesh.position.set(p.pos.x + f.x * 1.1, 1.15, p.pos.z + f.z * 1.1);
-    mesh.rotation.set(Math.PI / 2, 0, -p.heading + Math.PI / 2);
-    w.scene.add(mesh);
-    this.arcs.push({ mesh, mat, life: 0.28, maxLife: 0.28 });
-  }
-
-  hitSpark(w, x, y, z) {
-    if (w.fx) w.fx.burst(vec3(x, y, z), 0xffd23e, 12, 5, 0.16);
-    if (w.fx) w.fx.shake(0.12);
-  }
-
-  hitEnemy(w, enemy, damage, line) {
-    enemy.health -= damage;
-    this.hitSpark(w, enemy.pos.x, 1.3, enemy.pos.z);
-    if (w.hud) w.hud.showMessage(line);
-    if (enemy.health <= 0) this.killEnemy(w, enemy);
-  }
-
-  killEnemy(w, enemy) {
-    enemy.dead = true;
-    if (w.fx) w.fx.burst(vec3(enemy.pos.x, 1.2, enemy.pos.z), 0xff5544, 18, 7, 0.2);
-    if (enemy.mesh && w.scene) w.scene.remove(enemy.mesh);
-    const i = this.enemies.indexOf(enemy);
-    if (i >= 0) this.enemies.splice(i, 1);
-    if (w.stats) w.stats.crimes = (w.stats.crimes || 0) + 1;
-    if (Math.random() < 0.45) {
-      this.dropPickup(w, enemy.pos.x, enemy.pos.z);
-      if (w.hud) w.hud.showMessage('Gunman down — he dropped a pistol.');
-    } else if (w.hud) {
-      w.hud.showMessage('Gunman down.');
-    }
-  }
-
-  // -- the pistol ---------------------------------------------------------
-
-  shoot(w) {
-    const p = w.player;
-    if (!p || p.car || w.mode !== 'playing') return;
-    if (this.shootCooldown > 0) return;
-    if (p.weapon !== 'pistol') return;
-    if (p.ammo <= 0) {
-      if (w.hud) w.hud.showMessage('Out of ammo — press Q for fists.');
+  // -- weapons ----------------------------------------------------------
+  switchWeapon(w) {
+    const hero = this.playerOf(w);
+    if (!hero) return;
+    if (hero.weapon === 'pistol') {
+      hero.weapon = 'fists';
+    } else if (hero.hasPistol || (hero.ammo ?? 0) > 0) {
+      hero.weapon = 'pistol';
+    } else {
+      this.hudOf(w)?.showMessage?.('No pistol yet — drop a gunman to get one.');
       return;
     }
-    this.shootCooldown = SHOT_COOLDOWN;
-    p.ammo -= 1;
-    p.punchAnim = 0.6; // recoil snap of the gun arm
-    const px = p.pos.x;
-    const pz = p.pos.z;
-    const h = p.heading;
-    const f = forwardOf(h);
-    const from = vec3(px + f.x * 0.6, 1.35, pz + f.z * 0.6);
-    let end = vec3(px + f.x * SHOT_RANGE, 1.3, pz + f.z * SHOT_RANGE);
-    let hit = null;
-    let best = Infinity;
-    for (const e of this.enemies) {
-      if (e.dead) continue;
-      const d = dist2D(px, pz, e.pos.x, e.pos.z);
-      if (d > SHOT_RANGE) continue;
-      if (!inFront(px, pz, h, e.pos.x, e.pos.z, SHOT_RANGE, SHOT_ARC)) continue;
-      if (d < best) { best = d; hit = e; }
-    }
-    if (hit) {
-      end = vec3(hit.pos.x, 1.3, hit.pos.z);
-      this.hitEnemy(w, hit, SHOT_DAMAGE, 'Hit! Gunman down.');
-      if (w.audio && w.audio.tone) w.audio.tone(140, 0.12, 'square', 0.2, 0, -70);
-    } else if (w.audio && w.audio.tone) {
-      w.audio.tone(950, 0.09, 'square', 0.14, 0, -70);
-    }
-    this.spawnTracer(w, from, end);
-    if (w.fx) w.fx.burst(from, 0xffe9a0, 4, 2, 0.1);
+    this.hudOf(w)?.renderWeapon?.(hero);
+    this.audioOf(w)?.click?.();
   }
 
-  spawnTracer(w, from, to) {
-    const geo = new THREE.BufferGeometry().setFromPoints([from, to]);
-    const mat = new THREE.LineBasicMaterial({ color: 0xffe9a0, transparent: true, opacity: 0.9 });
-    const line = new THREE.Line(geo, mat);
-    w.scene.add(line);
-    this.tracers.push({ line, mat, geo, life: 0.09, maxLife: 0.09 });
-  }
-
-  // -- weapon switching and the flip key ----------------------------------
-
-  switchWeapon(w) {
-    const p = w.player;
-    if (!p || p.car) return;
-    if (p.weapon === 'pistol') {
-      p.weapon = 'fists';
-    } else {
-      if (p.ammo <= 0) {
-        if (w.hud) w.hud.showMessage('No pistol ammo — fists it is.');
-        return;
-      }
-      p.weapon = 'pistol';
-    }
-    if (p.weaponMesh) p.weaponMesh.visible = p.weapon === 'pistol';
-    if (w.hud) w.hud.showMessage(p.weapon === 'pistol' ? 'Pistol drawn.' : 'Fists up.');
-  }
-
+  // Right a flipped car. Called from the R key; harmless when there is
+  // nothing to flip.
   flipCar(w) {
-    const car = w.player ? w.player.car : null;
-    if (!car) return;
-    car.speed = 0;
-    if (car.mesh) car.mesh.position.y = 0;
-    if (w.hud) w.hud.showMessage('Car flipped upright.');
+    const s = this.state(w);
+    const hero = this.playerOf(w);
+    const car = hero?.car ?? s?.player?.car;
+    if (!car || !car.mesh) return false;
+    car.mesh.rotation.set(0, car.heading ?? 0, 0);
+    return true;
   }
 
-  // -- per-frame ----------------------------------------------------------
-
+  // -- per-frame --------------------------------------------------------
   update(w, dt) {
-    this.punchCooldown = Math.max(0, this.punchCooldown - dt);
-    this.shootCooldown = Math.max(0, this.shootCooldown - dt);
-    for (const a of [...this.arcs]) {
-      a.life -= dt;
-      a.mat.opacity = Math.max(0, (a.life / a.maxLife)) * 0.95;
-      if (a.life <= 0) {
-        w.scene.remove(a.mesh);
-        a.mat.dispose();
-        a.mesh.geometry.dispose();
-        this.arcs.splice(this.arcs.indexOf(a), 1);
+    const s = this.state(w);
+    if (!s) return;
+    const hero = this.playerOf(w);
+    if (this.punchTimer > 0) this.punchTimer -= dt;
+    if (this.punchAnim > 0) {
+      this.punchAnim = Math.max(0, this.punchAnim - dt * 3.2);
+      if (hero) hero.punchAnim = this.punchAnim;
+    }
+    if (hero && (hero.shootCooldown ?? 0) > 0) hero.shootCooldown -= dt;
+    const scene = this.sceneOf(w);
+    for (let i = this.arcs.length - 1; i >= 0; i--) {
+      if (!this.arcs[i].step(dt)) {
+        this.arcs[i].dispose(scene);
+        this.arcs.splice(i, 1);
       }
     }
-    for (const t of [...this.tracers]) {
-      t.life -= dt;
-      t.mat.opacity = Math.max(0, t.life / t.maxLife) * 0.9;
-      if (t.life <= 0) {
-        w.scene.remove(t.line);
-        t.mat.dispose();
-        t.geo.dispose();
-        this.tracers.splice(this.tracers.indexOf(t), 1);
-      }
-    }
-    this.updateEnemies(w, dt);
-    this.updatePickups(w, dt);
+    if (hero && !hero.car) this.collectPickups(s, hero);
+    if (!hero || hero.car) return;
+    for (const e of [...this.enemies]) this.updateEnemy(s, e, hero, dt);
   }
 
-  updateEnemies(w, dt) {
-    const p = w.player;
-    if (!p) return;
-    for (const e of [...this.enemies]) {
-      if (e.dead) continue;
-      const d = dist2D(e.pos.x, e.pos.z, p.pos.x, p.pos.z);
-      const want = Math.atan2(p.pos.x - e.pos.x, p.pos.z - e.pos.z);
-      let turn = want - e.heading;
-      while (turn > Math.PI) turn -= Math.PI * 2;
-      while (turn < -Math.PI) turn += Math.PI * 2;
-      e.heading += clamp(turn, -2.4 * dt, 2.4 * dt);
-      if (d > ENEMY_STOP && !p.car) {
-        // Close in on foot Cole.
-        const f = forwardOf(e.heading);
-        e.pos.x = clamp(e.pos.x + f.x * e.speed * dt, -235, 235);
-        e.pos.z = clamp(e.pos.z + f.z * e.speed * dt, -235, 235);
-        e.walkPhase += dt * 9;
-        const swing = Math.sin(e.walkPhase) * 0.45;
-        if (e.legL) e.legL.rotation.x = swing;
-        if (e.legR) e.legR.rotation.x = -swing;
-      } else if (d > ENEMY_STOP && p.car) {
-        // Cole is driving: hold ground and wait — a gunman on foot
-        // cannot catch a car, so he does not sprint into traffic.
-        e.walkPhase += dt * 2;
-      } else {
-        // In range: stand, aim and fire.
-        if (e.legL) e.legL.rotation.x = 0;
-        if (e.legR) e.legR.rotation.x = 0;
-        e.fireTimer -= dt;
-        if (e.fireTimer <= 0 && w.mode === 'playing' && p.health > 0) {
-          e.fireTimer = ENEMY_FIRE_EVERY * rand(0.85, 1.25);
-          const from = vec3(e.pos.x, 1.35, e.pos.z);
-          const to = vec3(p.pos.x, 1.2, p.pos.z);
-          this.spawnTracer(w, from, to);
-          if (w.fx) w.fx.burst(from, 0xffe9a0, 4, 2, 0.1);
-          if (w.audio && w.audio.tone) w.audio.tone(700, 0.08, 'square', 0.1, 0, -70);
-          damagePlayer(w, ENEMY_SHOT_DAMAGE, 'shot');
-          if (w.hud) w.hud.flashDamage();
-        }
-      }
-      e.mesh.position.set(e.pos.x, 0, e.pos.z);
+  updateEnemy(s, e, hero, dt) {
+    const d = Math.hypot(hero.pos.x - e.pos.x, hero.pos.z - e.pos.z);
+    if (e.flashTimer > 0) e.flashTimer -= dt;
+    if (d > ENEMY_FIRE_RANGE) {
+      e.state = 'chase';
+      e.walkToward(s, hero.pos.x, hero.pos.z, ENEMY_SPEED, dt);
+    } else if (d > ENEMY_HOLD_RANGE) {
+      e.state = 'chase';
+      e.walkToward(s, hero.pos.x, hero.pos.z, ENEMY_SPEED * 0.8, dt);
+    } else {
+      e.state = 'shoot';
+      e.heading = angleTo(e.pos.x, e.pos.z, hero.pos.x, hero.pos.z);
       e.mesh.rotation.y = e.heading;
+      e.strafeTimer -= dt;
+      if (e.strafeTimer <= 0) {
+        e.strafeDir *= -1;
+        e.strafeTimer = 1.5 + Math.random() * 1.5;
+      }
+      const side = forwardOf(e.heading + Math.PI / 2);
+      e.pos.x += side.x * e.strafeDir * 0.7 * dt;
+      e.pos.z += side.z * e.strafeDir * 0.7 * dt;
+      e.mesh.position.set(e.pos.x, 0, e.pos.z);
+      this.enemyFire(s, e, hero, d, dt);
+    }
+    if (e.armR) e.armR.rotation.x = e.state === 'shoot' ? -1.35 : -1.1;
+  }
+
+  enemyFire(s, e, hero, dist, dt) {
+    if (e.burstLeft > 0) {
+      e.burstGap -= dt;
+      if (e.burstGap <= 0) {
+        e.burstGap = 0.16;
+        e.burstLeft -= 1;
+        this.enemyShot(s, e, hero, dist);
+      }
+      return;
+    }
+    e.fireTimer -= dt;
+    if (e.fireTimer <= 0) {
+      e.burstLeft = 3;
+      e.burstGap = 0;
+      e.fireTimer = 1.6 + Math.random() * 1.2;
     }
   }
 
-  updatePickups(w, dt) {
-    const p = w.player;
-    if (!p) return;
-    for (const pk of [...this.pickups]) {
-      pk.bob += dt * 3;
-      pk.mesh.position.y = 0.6 + Math.sin(pk.bob) * 0.12;
-      pk.mesh.rotation.y += dt * 2;
-      if (!p.car && dist2D(p.pos.x, p.pos.z, pk.pos.x, pk.pos.z) < PICKUP_RADIUS) {
-        p.ammo = (p.ammo || 0) + 12;
-        if (p.weapon !== 'pistol') {
-          p.weapon = 'pistol';
-          if (p.weaponMesh) p.weaponMesh.visible = true;
-        }
-        if (w.hud) w.hud.showMessage('Picked up a pistol. +12 ammo.');
-        if (w.audio) w.audio.cash();
-        w.scene.remove(pk.mesh);
-        this.pickups.splice(this.pickups.indexOf(pk), 1);
-      }
-    }
+  enemyShot(s, e, hero, dist) {
+    const fx = this.fxOf(s);
+    const f = forwardOf(e.heading);
+    const ox = e.pos.x + f.x * 0.5;
+    const oz = e.pos.z + f.z * 0.5;
+    fx?.muzzle?.(ox, 1.35, oz);
+    fx?.tracer?.(ox, 1.35, oz, hero.pos.x, 1.3, hero.pos.z);
+    this.audioOf(s)?.gunshot?.();
+    // Far shots mostly miss; close ones usually do not.
+    const hitChance = dist < 6 ? 0.75 : dist < 12 ? 0.5 : 0.3;
+    if (Math.random() > hitChance) return;
+    if ((hero.invuln ?? 0) > 0) return;
+    hero.health = Math.max(0, (hero.health ?? 100) - ENEMY_SHOT_DAMAGE);
+    hero.invuln = 0.7;
+    this.hudOf(s)?.flashDamage?.();
+    this.hudOf(s)?.renderHealth?.(hero);
+    s.police?.addWanted?.(s, 1, 'shot-at');
   }
 }
