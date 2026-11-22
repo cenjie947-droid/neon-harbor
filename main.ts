@@ -85,9 +85,14 @@ function checkGame() {
 }
 
 // Start from a clean output folder, then copy the game and the shots in.
+// NOTE: never remove the output folder itself — in the grader /output is
+// a mounted directory, and removing a mount point fails with EBUSY
+// (exit 1). Empty its contents instead; the folder stays put.
 function pack(shots) {
-  rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
+  for (const name of readdirSync(outDir)) {
+    rmSync(join(outDir, name), { recursive: true, force: true });
+  }
   cpSync(gameDir, join(outDir, 'game'), { recursive: true });
   mkdirSync(join(outDir, 'screenshots'), { recursive: true });
   for (const name of shots) {
