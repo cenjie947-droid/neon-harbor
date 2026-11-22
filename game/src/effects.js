@@ -1,226 +1,227 @@
-// Neon Harbor — particles and camera shake.
+// Neon Harbor — particle effects (round 6 fresh rewrite).
+// One pooled particle system for sparks, smoke, explosions, muzzle
+// flashes and tracers, plus the screen-shake trauma used by the camera.
+// Particles are small scaled boxes from a shared geometry with one cached
+// material per colour, so a big explosion costs no new materials.
 //
-// Every transient visual lives here: sparks and smoke from crashes,
-// muzzle flashes and tracers from gunfire, the burst when a punch
-// lands, and the screen shake that sells an impact. Particles are
-// small meshes added to the scene and retired once their life runs
-// out, so the scene never accumulates dead geometry.
-//
-// The driver reads game.fx.particles.length to confirm a damaged car
-// is smoking, so particles must be real scene meshes in that array.
-//
-// Position arguments accept either a THREE.Vector3 or plain numeric
-// coordinates: vehicles.js passes vectors (burst(at, ...),
-// smokePuff(hood)), while combat.js passes numbers (burst(x, y, z,
-// ...), muzzle(x, y, z), tracer(x1, y1, z1, x2, y2, z2)). Both forms
-// resolve to the same point.
+// Calling convention: burst / muzzle / tracer / smokePuff / explosion all
+// accept EITHER plain numbers (x, y, z, ...) OR Vector3 objects — combat
+// calls them with numbers, vehicles with Vector3s — so every entry point
+// normalises its first argument before doing anything else.
 
-import * as THREE from 'three';
-import { rand } from './state.js';
+export function createEffects(G, THREE, scene) {
+  const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+  const matCache = new Map();
+  const freePool = [];
+  const particles = [];
+  let trauma = 0;
+  let lastShakeAt = 0;
 
-const MAX_PARTICLES = 400;
-
-// Normalise a position argument: a Vector3 is used as-is, three
-// numbers become a fresh Vector3.
-function toVec(a, b, c) {
-  if (a !== null && typeof a === 'object') return a;
-  return new THREE.Vector3(a ?? 0, b ?? 0, c ?? 0);
-}
-
-export class Effects {
-  constructor(game) {
-    this.game = game;
-    this.particles = [];
-    this.shakeAmount = 0;
-    this.shakeTime = 0;
+  function matFor(color) {
+    if (!matCache.has(color)) {
+      matCache.set(color, new THREE.MeshBasicMaterial({ color, transparent: true }));
+    }
+    return matCache.get(color);
   }
 
-  // Register one particle mesh with a velocity and a lifetime.
-  // opts: { gravity, drag, grow, shrink, fade, spin }.
-  add(mesh, vel, life, opts = {}) {
-    if (this.particles.length >= MAX_PARTICLES) this.retire(0);
-    mesh.position.y = mesh.position.y || 0;
-    this.game.scene.add(mesh);
-    this.particles.push({
-      mesh,
-      vel: vel.clone ? vel.clone() : new THREE.Vector3(vel.x, vel.y, vel.z),
+  function takeMesh(color) {
+    let mesh = freePool.pop();
+    if (!mesh) {
+      mesh = new THREE.Mesh(boxGeo, matFor(color));
+    } else {
+      mesh.material = matFor(color);
+    }
+    mesh.visible = true;
+    scene.add(mesh);
+    return mesh;
+  }
+
+  // Normalise "either a Vector3 or (x, y, z)" into a fresh Vector3.
+  function toVec(a, b, c) {
+    if (a && typeof a === 'object' && 'x' in a && 'z' in a) {
+      return new THREE.Vector3(a.x, a.y || 0, a.z);
+    }
+    return new THREE.Vector3(a || 0, b || 0, c || 0);
+  }
+
+  // Positional spawn used by every effect below: addP(x, y, z, vx, vy, vz,
+  // life, size, color, gravity, grow).
+  function addP(x, y, z, vx, vy, vz, life, size, color, gravity = 6, grow = 0) {
+    const mesh = takeMesh(color);
+    mesh.position.set(x, y, z);
+    mesh.scale.setScalar(Math.max(0.02, size));
+    const p = {
+      pos: new THREE.Vector3(x, y, z),
+      vel: new THREE.Vector3(vx, vy, vz),
       life,
       maxLife: life,
-      gravity: opts.gravity ?? 0,
-      drag: opts.drag ?? 0,
-      grow: opts.grow ?? 0,
-      shrink: opts.shrink ?? 0,
-      fade: opts.fade !== false,
-      spin: opts.spin ?? 0,
-    });
+      size,
+      gravity,
+      grow,
+      mesh,
+    };
+    particles.push(p);
+    return p;
   }
 
-  // A spray of small coloured cubes flying out from a point.
-  // burst(at, color, count, speed, size) or burst(x, y, z, color, count).
-  burst(a, b, c, d, e, f) {
-    let at;
-    let color;
-    let count = 12;
-    let speed = 6;
-    let size = 0.22;
-    if (a !== null && typeof a === 'object') {
-      at = a;
-      color = b;
-      count = c ?? 12;
-      speed = d ?? 6;
-      size = e ?? 0.22;
+  // Unpack the two calling styles for the public burst-style methods.
+  // Number form:  fn(x, y, z, count, color, speed)
+  // Vector form:  fn(vec, count, color, speed)
+  function unpack(a, b, c, count, color, speed) {
+    if (a && typeof a === 'object' && 'x' in a) {
+      return {
+        x: a.x, y: a.y || 0, z: a.z,
+        count: b ?? 10, color: c ?? 0xffffff, speed: count ?? 6,
+      };
+    }
+    return { x: a || 0, y: b || 0, z: c || 0, count: count ?? 10, color: color ?? 0xffffff, speed: speed ?? 6 };
+  }
+
+  function burst(a, b, c, count, color, speed) {
+    const u = unpack(a, b, c, count, color, speed);
+    for (let i = 0; i < u.count; i++) {
+      const ang = Math.random() * Math.PI * 2;
+      const up = (Math.random() - 0.3) * u.speed;
+      const sp = u.speed * (0.4 + Math.random() * 0.8);
+      addP(
+        u.x, u.y, u.z,
+        Math.cos(ang) * sp, up, Math.sin(ang) * sp,
+        0.35 + Math.random() * 0.45,
+        0.12 + Math.random() * 0.16,
+        u.color, 7
+      );
+    }
+  }
+
+  function smokePuff(a, b, c) {
+    const v = toVec(a, b, c);
+    addP(
+      v.x, v.y, v.z,
+      (Math.random() - 0.5) * 0.8, 1.2 + Math.random() * 0.8, (Math.random() - 0.5) * 0.8,
+      1.1 + Math.random() * 0.7,
+      0.5 + Math.random() * 0.3,
+      0x777777, -1.2, 1.6
+    );
+  }
+
+  function explosion(a, b, c) {
+    const v = toVec(a, b, c);
+    burst(v.x, v.y, v.z, 22, 0xff7722, 9);
+    burst(v.x, v.y, v.z, 10, 0xffcc44, 6);
+    for (let i = 0; i < 8; i++) smokePuff(v.x + (Math.random() - 0.5) * 2, v.y + Math.random(), v.z + (Math.random() - 0.5) * 2);
+    shake(0.55);
+    if (G.audio) G.audio.crash();
+  }
+
+  function muzzle(a, b, c) {
+    const v = toVec(a, b, c);
+    for (let i = 0; i < 4; i++) {
+      addP(
+        v.x, v.y, v.z,
+        (Math.random() - 0.5) * 2, (Math.random() - 0.5) * 2, (Math.random() - 0.5) * 2,
+        0.08 + Math.random() * 0.05,
+        0.22 + Math.random() * 0.12,
+        0xffe066, 0
+      );
+    }
+  }
+
+  // A tracer is a stretched thin box from `from` to `to`, alive ~90 ms.
+  // Accepts (vecFrom, vecTo) or (fx, fy, fz, tx, ty, tz).
+  function tracer(a, b, c, d, e, f) {
+    let from, to;
+    if (a && typeof a === 'object' && 'x' in a) {
+      from = new THREE.Vector3(a.x, a.y || 0, a.z);
+      to = toVec(b, c, d);
     } else {
-      at = new THREE.Vector3(a, b, c);
-      color = d;
-      count = e ?? 12;
-      speed = f ?? 6;
+      from = new THREE.Vector3(a || 0, b || 0, c || 0);
+      to = new THREE.Vector3(d || 0, e || 0, f || 0);
     }
-    for (let i = 0; i < count; i++) {
-      const mat = new THREE.MeshBasicMaterial({ color, transparent: true });
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(size, size, size), mat);
-      mesh.position.copy(at);
-      const vel = new THREE.Vector3(rand(-1, 1), rand(0.2, 1.2), rand(-1, 1))
-        .normalize()
-        .multiplyScalar(rand(speed * 0.4, speed));
-      this.add(mesh, vel, rand(0.35, 0.8), { gravity: -9, fade: true, spin: rand(-6, 6) });
+    const len = from.distanceTo(to);
+    if (len < 0.1) return;
+    const mesh = takeMesh(0xffe9a8);
+    const mid = from.clone().add(to).multiplyScalar(0.5);
+    mesh.position.copy(mid);
+    mesh.scale.set(0.07, 0.07, len);
+    mesh.lookAt(to);
+    const p = {
+      pos: mid, vel: new THREE.Vector3(0, 0, 0),
+      life: 0.09, maxLife: 0.09, size: 0.07, gravity: 0, grow: 0,
+      mesh, stretched: true,
+    };
+    particles.push(p);
+    return p;
+  }
+
+  function shake(amount) {
+    trauma = Math.min(1, trauma + amount);
+  }
+
+  // Jitter the camera by the current trauma, then let the trauma decay.
+  // Called once per frame after the camera has been positioned.
+  function applyShake(camera) {
+    if (trauma <= 0.001) return;
+    const now = (typeof performance !== 'undefined' ? performance.now() : 0) / 1000;
+    const dt = lastShakeAt ? Math.min(0.05, now - lastShakeAt) : 0.016;
+    lastShakeAt = now;
+    const mag = trauma * trauma * 0.55;
+    camera.position.x += (Math.random() - 0.5) * mag;
+    camera.position.y += (Math.random() - 0.5) * mag;
+    camera.position.z += (Math.random() - 0.5) * mag;
+    trauma = Math.max(0, trauma - dt * 1.6);
+  }
+
+  function retire(p) {
+    const i = particles.indexOf(p);
+    if (i >= 0) particles.splice(i, 1);
+    if (p.mesh) {
+      p.mesh.visible = false;
+      scene.remove(p.mesh);
+      freePool.push(p.mesh);
+      p.mesh = null;
     }
   }
 
-  // One soft grey smoke puff, rising and swelling as it fades.
-  smokePuff(a, b, c) {
-    const at = toVec(a, b, c);
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0x8a8a8a, transparent: true, opacity: 0.55,
-    });
-    const mesh = new THREE.Mesh(new THREE.SphereGeometry(rand(0.35, 0.5), 8, 6), mat);
-    mesh.position.copy(at);
-    const vel = new THREE.Vector3(rand(-0.4, 0.4), rand(1.2, 2), rand(-0.4, 0.4));
-    this.add(mesh, vel, rand(1.2, 1.8), { grow: 1.6, fade: true });
-  }
-
-  // A crash explosion: orange fireball, dark smoke and a spray of sparks.
-  explosion(a, b, c) {
-    const at = toVec(a, b, c);
-    const fireMat = new THREE.MeshBasicMaterial({ color: 0xff7a20, transparent: true });
-    const fire = new THREE.Mesh(new THREE.SphereGeometry(1.1, 10, 8), fireMat);
-    fire.position.copy(at);
-    this.add(fire, new THREE.Vector3(0, 1.5, 0), 0.5, { grow: 3.5, fade: true });
-    for (let i = 0; i < 5; i++) {
-      const p = at.clone();
-      p.x += rand(-0.8, 0.8);
-      p.z += rand(-0.8, 0.8);
-      p.y += rand(0, 1);
-      this.smokePuff(p);
-    }
-    this.burst(at, 0xffc860, 16, 9, 0.26);
-    this.burst(at, 0xff4a20, 8, 6, 0.3);
-    this.shake(0.7);
-    if (this.game.audio) this.game.audio.crash();
-  }
-
-  // A brief muzzle flash at the gun's tip. muzzle(origin, dir) with
-  // vectors, or muzzle(x, y, z) with plain coordinates.
-  muzzle(a, b, c) {
-    let origin;
-    let dir = null;
-    if (a !== null && typeof a === 'object') {
-      origin = a;
-      dir = b;
-    } else {
-      origin = new THREE.Vector3(a, b, c);
-    }
-    const mat = new THREE.MeshBasicMaterial({ color: 0xffe9a0, transparent: true });
-    const flash = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.9, 6), mat);
-    flash.position.copy(origin);
-    if (dir) {
-      flash.position.addScaledVector(dir, 0.45);
-      flash.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
-    }
-    this.add(flash, new THREE.Vector3(0, 0, 0), 0.09, { fade: true });
-  }
-
-  // A thin bright line from one point to another that vanishes in a
-  // blink — the visible path of a bullet. tracer(from, to) with
-  // vectors, or tracer(x1, y1, z1, x2, y2, z2) with numbers.
-  tracer(a, b, c, d, e, f) {
-    let from;
-    let to;
-    if (a !== null && typeof a === 'object') {
-      from = a;
-      to = b;
-    } else {
-      from = new THREE.Vector3(a, b, c);
-      to = new THREE.Vector3(d, e, f);
-    }
-    const length = from.distanceTo(to);
-    if (length < 0.5) return;
-    const mat = new THREE.MeshBasicMaterial({ color: 0xffe9a0, transparent: true });
-    const beam = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, length), mat);
-    beam.position.copy(from).add(to).multiplyScalar(0.5);
-    beam.lookAt(to);
-    this.add(beam, new THREE.Vector3(0, 0, 0), 0.12, { fade: true });
-  }
-
-  // Kick the camera. Larger amounts shake harder and longer.
-  shake(amount) {
-    this.shakeAmount = Math.max(this.shakeAmount, amount);
-    this.shakeTime = Math.max(this.shakeTime, 0.35 + amount * 0.3);
-  }
-
-  // Apply the current shake to the camera each frame. Called from the
-  // main loop after the camera has been positioned for the frame.
-  applyShake(dt) {
-    if (this.shakeTime <= 0 || !this.game.camera) return;
-    this.shakeTime -= dt;
-    const decay = Math.max(0, this.shakeTime / 0.6);
-    const a = this.shakeAmount * decay;
-    const camera = this.game.camera;
-    camera.position.x += rand(-a, a) * 0.35;
-    camera.position.y += rand(-a, a) * 0.35;
-    camera.position.z += rand(-a, a) * 0.2;
-    if (this.shakeTime <= 0) this.shakeAmount = 0;
-  }
-
-  // Remove particle i from the scene and the list, freeing its geometry.
-  retire(i) {
-    const p = this.particles[i];
-    if (!p) return;
-    this.game.scene.remove(p.mesh);
-    if (p.mesh.geometry) p.mesh.geometry.dispose();
-    if (p.mesh.material) p.mesh.material.dispose();
-    this.particles.splice(i, 1);
-  }
-
-  // Advance one particle one frame: velocity, gravity, drag, growth,
-  // shrink, spin and fading. Returns false when its life is spent.
-  stepParticle(p, dt) {
+  function stepParticle(p, dt) {
+    p.vel.y -= p.gravity * dt;
+    p.pos.x += p.vel.x * dt;
+    p.pos.y += p.vel.y * dt;
+    p.pos.z += p.vel.z * dt;
     p.life -= dt;
-    if (p.life <= 0) return false;
-    p.vel.y += p.gravity * dt;
-    if (p.drag) p.vel.multiplyScalar(Math.max(0, 1 - p.drag * dt));
-    p.mesh.position.addScaledVector(p.vel, dt);
-    if (p.grow) {
-      const s = 1 + p.grow * dt;
-      p.mesh.scale.multiplyScalar(s);
+    if (p.mesh && !p.stretched) {
+      const k = Math.max(0.05, p.life / p.maxLife);
+      const s = p.size * (p.grow ? 1 + (1 - k) * p.grow : k);
+      p.mesh.scale.setScalar(Math.max(0.02, s));
+      p.mesh.position.copy(p.pos);
+      p.mesh.rotation.y += dt * 3;
+      p.mesh.rotation.x += dt * 2;
     }
-    if (p.shrink) {
-      const s = Math.max(0.01, 1 - p.shrink * dt);
-      p.mesh.scale.multiplyScalar(s);
-    }
-    if (p.spin) {
-      p.mesh.rotation.x += p.spin * dt;
-      p.mesh.rotation.y += p.spin * 0.7 * dt;
-    }
-    if (p.fade && p.mesh.material && p.mesh.material.transparent) {
-      p.mesh.material.opacity = Math.max(0, (p.life / p.maxLife) * 0.6);
-    }
-    return true;
   }
 
-  // Advance every particle; retire the spent ones.
-  update(dt) {
-    for (let i = this.particles.length - 1; i >= 0; i--) {
-      if (!this.stepParticle(this.particles[i], dt)) this.retire(i);
+  function update(dt) {
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      stepParticle(p, dt);
+      if (p.life <= 0) retire(p);
     }
   }
+
+  const fx = {
+    particles,
+    add: addP,
+    burst,
+    smokePuff,
+    explosion,
+    muzzle,
+    tracer,
+    shake,
+    applyShake,
+    retire,
+    stepParticle,
+    update,
+  };
+  G.fx = fx;
+  return fx;
 }
+
+export default createEffects;

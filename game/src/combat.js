@@ -1,552 +1,670 @@
-// Neon Harbor — combat: bare hands, a pistol, and Dario Venn's gunmen.
+// combat.js — fists, pistol, armed gang gunmen and pickups for Neon Harbor.
 //
-// Cole's fists never leave him. A click throws a swing you can actually
-// see — a pale arc sweeping in front of him, a whoosh, and a line on
-// screen that says what happened: "Punch landed!" with a spark burst
-// when it connects, "You swing at thin air." when it does not. The
-// pistol is the answer to Venn's crew: twelve rounds, Q to draw it,
-// a tracer down the aim line on every shot. Gunmen walk in until they
-// are close enough to shoot, plant their feet, and fire in bursts of
-// three; put one down and there is a fair chance he leaves a pistol
-// pickup on the pavement.
+// This module owns everything violent: the punch, the pistol, the gang
+// gunmen who hunt Cole, and the pickups they leave behind. It talks to the
+// rest of the game only through the shared state object G, so it never
+// assumes which module created the player, the police or the effects.
 //
-// This module owns no keys and no input. main.js calls attack() when
-// the player clicks with fists out, shoot() when he clicks with the
-// pistol out, spawnEnemy() when a mission stages an ambush, and
-// update() every frame while the world is playing.
-import * as THREE from 'three';
+// Conventions used here (and nowhere else): effect helpers always take
+// plain numbers (x, y, z), never Vector3 objects, so a caller can pass
+// coordinates straight out of any position record.
 
-// Punch reach, swing cone, damage and swing rate.
-const FIST_REACH = 2.4;
-const FIST_HALF_CONE = 1.1;
-const FIST_DAMAGE = 12;
-const FIST_RATE = 0.38;
-// Pistol reach, damage and fire rate.
-const PISTOL_REACH = 46;
-const PISTOL_DAMAGE = 34;
-const PISTOL_RATE = 0.42;
-// What a gunman is made of and how he fights.
-const GUNMAN_HEALTH = 50;
-const GUNMAN_WALK = 3.6;
-const GUNMAN_SHOOT_FROM = 19;
-const GUNMAN_PLANT_AT = 12;
-const GUNMAN_SHOT_HURT = 7;
-const GUNMAN_DROP_ODDS = 0.45;
-// How close Cole must be to pick a dropped pistol up.
-const PICKUP_REACH = 2.2;
+// NOTE: this module never imports three.js. Main passes THREE in through
+// the constructor (or it rides on the state object as G.THREE), and every
+// mesh below is a visual-only extra — when no THREE is available the
+// logic still runs and only the arc / tracer / flash records are kept.
 
-function bearing(ax, az, bx, bz) {
-  return Math.atan2(bx - ax, bz - az);
+const PUNCH_REACH = 2.4;
+const PUNCH_ARC = 1.9; // radians of forward cone the fist can catch
+const PUNCH_COOLDOWN = 0.38;
+const PUNCH_DAMAGE = 34;
+const PISTOL_AMMO = 12;
+const PISTOL_RANGE = 42;
+const PISTOL_COOLDOWN = 0.24;
+const GUNMAN_APPROACH_RANGE = 26;
+const GUNMAN_PLANT_RANGE = 17;
+const GUNMAN_BURST_GAP = 1.35;
+const GUNMAN_SHOTS_PER_BURST = 3;
+const GUNMAN_SHOT_GAP = 0.13;
+const GUNMAN_HIT_CHANCE = 0.3;
+const GUNMAN_SHOT_DAMAGE = 7;
+
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
 }
 
-function foldAngle(a) {
-  while (a > Math.PI) a -= Math.PI * 2;
-  while (a < -Math.PI) a += Math.PI * 2;
-  return a;
+function angleDiff(a, b) {
+  let d = a - b;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
 }
 
-function facing(heading) {
+function forwardOf(heading) {
   return { x: Math.sin(heading), z: Math.cos(heading) };
 }
 
-function clampHealth(v) {
-  return Math.max(0, Math.min(100, v ?? 100));
-}
-
-// The visible swing. main.js reads combat.arcs each frame, and the
-// test driver counts arcs to prove a punch really happened.
-class PunchArc {
-  constructor(scene, origin, heading) {
-    const geo = new THREE.TorusGeometry(1.25, 0.09, 8, 18, Math.PI * 0.95);
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0xfff2c0,
-      transparent: true,
-      opacity: 0.95,
-    });
-    this.mesh = new THREE.Mesh(geo, mat);
-    const dir = facing(heading);
-    this.mesh.position.set(origin.x + dir.x * 1.1, 1.25, origin.z + dir.z * 1.1);
-    this.mesh.rotation.order = 'YXZ';
-    this.mesh.rotation.y = heading;
-    this.mesh.rotation.x = Math.PI / 2;
-    this.remaining = 0.28;
-    this.total = 0.28;
-    scene.add(this.mesh);
-  }
-
-  // Fade and swell the arc. False when its life is spent.
-  tick(dt) {
-    this.remaining -= dt;
-    const k = Math.max(0, this.remaining / this.total);
-    this.mesh.material.opacity = 0.95 * k;
-    const grow = 1 + (1 - k) * 0.35;
-    this.mesh.scale.set(grow, grow, grow);
-    return this.remaining > 0;
-  }
-
-  remove(scene) {
-    scene.remove(this.mesh);
-    this.mesh.geometry.dispose();
-    this.mesh.material.dispose();
-  }
-}
-
-// One of Venn's gunmen: dark suit, red shirt front, a hat, a pistol
-// held out in front. He walks toward Cole until he is close enough to
-// shoot, then plants his feet and fires in bursts, strafing sideways
-// between bursts so he is not a still target.
-class Gunman {
-  constructor(scene, x, z) {
-    this.pos = new THREE.Vector3(x, 0, z);
-    this.heading = Math.random() * Math.PI * 2;
-    this.health = GUNMAN_HEALTH;
-    this.mode = 'chase';
-    this.nextBurstIn = 1.2 + Math.random() * 0.8;
-    this.shotsLeft = 0;
-    this.shotGap = 0;
-    this.strafe = Math.random() < 0.5 ? 1 : -1;
-    this.strafeIn = 2 + Math.random() * 2;
-    this.hitFlash = 0;
-    this.mesh = this.assemble();
-    this.mesh.position.set(x, 0, z);
-    scene.add(this.mesh);
-  }
-
-  assemble() {
-    const group = new THREE.Group();
-    const suit = new THREE.MeshLambertMaterial({ color: 0x1c1c22 });
-    const skin = new THREE.MeshLambertMaterial({ color: 0xc9976b });
-    const shirt = new THREE.MeshLambertMaterial({ color: 0x8f1d1d });
-    const chest = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.78, 0.34), suit);
-    chest.position.y = 1.18;
-    group.add(chest);
-    const front = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.6, 0.05), shirt);
-    front.position.set(0, 1.2, 0.19);
-    group.add(front);
-    const head = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.36, 0.32), skin);
-    head.position.y = 1.78;
-    group.add(head);
-    const brim = new THREE.Mesh(
-      new THREE.BoxGeometry(0.44, 0.09, 0.44),
-      new THREE.MeshLambertMaterial({ color: 0x111114 }),
-    );
-    brim.position.y = 1.99;
-    group.add(brim);
-    const legs = new THREE.MeshLambertMaterial({ color: 0x141416 });
-    const legL = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.8, 0.26), legs);
-    legL.position.set(-0.16, 0.4, 0);
-    group.add(legL);
-    const legR = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.8, 0.26), legs);
-    legR.position.set(0.16, 0.4, 0);
-    group.add(legR);
-    const armL = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.62, 0.2), suit);
-    armL.position.set(-0.42, 1.2, 0);
-    group.add(armL);
-    this.armR = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.62, 0.2), suit);
-    this.armR.position.set(0.42, 1.2, 0.14);
-    this.armR.rotation.x = -1.1;
-    group.add(this.armR);
-    this.gun = new THREE.Mesh(
-      new THREE.BoxGeometry(0.08, 0.1, 0.42),
-      new THREE.MeshLambertMaterial({ color: 0x0a0a0c }),
-    );
-    this.gun.position.set(0.42, 1.32, 0.42);
-    group.add(this.gun);
-    return group;
-  }
-
-  // Step toward a point, sliding around buildings when the world
-  // offers a collision helper.
-  strideToward(w, tx, tz, speed, dt) {
-    const dx = tx - this.pos.x;
-    const dz = tz - this.pos.z;
-    const dist = Math.hypot(dx, dz) || 1;
-    const nx = this.pos.x + (dx / dist) * speed * dt;
-    const nz = this.pos.z + (dz / dist) * speed * dt;
-    if (typeof w.collideCircle === 'function') {
-      const solved = w.collideCircle(nx, nz, 0.5);
-      this.pos.x = solved.x;
-      this.pos.z = solved.z;
-    } else {
-      this.pos.x = nx;
-      this.pos.z = nz;
-    }
-    this.heading = bearing(this.pos.x, this.pos.z, tx, tz);
-    this.mesh.position.set(this.pos.x, 0, this.pos.z);
-    this.mesh.rotation.y = this.heading;
-  }
-}
-
 export class Combat {
-  constructor(game) {
-    this.game = game;
+  constructor(G, THREE) {
+    this.G = G;
+    // Main passes THREE in; the state object may also carry it as
+    // G.THREE. When neither is present, meshes are skipped and only the
+    // arc / tracer / flash records are kept — the logic never depends on
+    // the renderer.
+    this.THREE = THREE || (G && (G.THREE || G.three)) || null;
+    // Visible swing arcs the renderer can draw: {x, y, z, angle, life}.
     this.arcs = [];
-    this.enemies = [];
+    // Tracer lines: {x1,y1,z1,x2,y2,z2,life}.
+    this.tracers = [];
+    // Muzzle flashes: {x, y, z, life}.
+    this.flashes = [];
+    // Gunmen currently hunting Cole.
+    this.gunmen = [];
+    // Pickups on the ground: {kind, x, y, z, life}.
     this.pickups = [];
-    this.punchTimer = 0;
-    this.punchAnim = 0;
+    this.punchCooldown = 0;
+    this.shootCooldown = 0;
+    this._arcMeshes = [];
+    this._tracerMeshes = [];
+    this._flashMeshes = [];
+    this._gunmanMeshes = new Map();
+    // Mirror the pickup list onto the shared state so any other module
+    // (player movement, the renderer) can see the same pickups.
+    if (G) G.pickups = this.pickups;
   }
 
-  // The world object the main loop passes in each frame; fall back to
-  // whatever the constructor was handed.
-  world(w) {
-    return w ?? this.game;
+  // -- small helpers ------------------------------------------------------
+
+  _player() {
+    return this.G && this.G.player ? this.G.player : null;
   }
 
-  sceneOf(w) {
-    const s = this.world(w);
-    return s.scene ?? s.G?.scene ?? null;
+  // The THREE namespace main passed in, or null when there is none.
+  _T() {
+    return this.THREE || (this.G && (this.G.THREE || this.G.three)) || null;
   }
 
-  heroOf(w) {
-    const s = this.world(w);
-    return s.player ?? s.G?.player ?? null;
-  }
-
-  hudOf(w) {
-    const s = this.world(w);
-    return s.hud ?? s.G?.hud ?? null;
-  }
-
-  audioOf(w) {
-    const s = this.world(w);
-    return s.audio ?? s.G?.audio ?? null;
-  }
-
-  fxOf(w) {
-    const s = this.world(w);
-    return s.fx ?? s.G?.fx ?? null;
-  }
-
-  // -- fists ------------------------------------------------------------
-  // Swing. Returns true when the swing connected with something.
-  attack(w) {
-    const s = this.world(w);
-    const hero = this.heroOf(w);
-    if (!hero || !s) return false;
-    if (this.punchTimer > 0) return false;
-    if (hero.car) return false; // no punching from the driver's seat
-    this.punchTimer = FIST_RATE;
-    this.punchAnim = 1;
-    hero.punchAnim = 1;
-    const scene = this.sceneOf(w);
-    if (scene) this.arcs.push(new PunchArc(scene, hero.pos, hero.heading));
-    this.audioOf(w)?.punch?.();
-    const connected = this.resolvePunch(s, hero);
-    const hud = this.hudOf(w);
-    if (connected) hud?.showMessage?.('Punch landed!');
-    else hud?.showMessage?.('You swing at thin air.');
-    return connected;
-  }
-
-  // Find the closest thing inside the swing cone and hurt it. Returns
-  // true when something connected, so the caller can say so on screen.
-  resolvePunch(s, hero) {
-    const dir = facing(hero.heading);
-    const px = hero.pos.x + dir.x * 1.4;
-    const pz = hero.pos.z + dir.z * 1.4;
-    let best = null;
-    let bestD = FIST_REACH;
-    const weigh = (target, x, z, kind) => {
-      const d = Math.hypot(x - px, z - pz);
-      if (d > bestD) return;
-      const off = Math.abs(foldAngle(Math.atan2(x - hero.pos.x, z - hero.pos.z) - hero.heading));
-      if (off > FIST_HALF_CONE) return;
-      best = { target, kind };
-      bestD = d;
-    };
-    for (const e of this.enemies) weigh(e, e.pos.x, e.pos.z, 'enemy');
-    for (const p of s.peds ?? []) {
-      if (p.state === 'down') continue;
-      weigh(p, p.pos.x, p.pos.z, 'ped');
+  // The player module calls swing(G) / shoot(G) with the state; adopt it
+  // when one is handed in so this module always works on live state.
+  _useG(G) {
+    if (G && G.player) {
+      this.G = G;
+      if (!this.THREE && (G.THREE || G.three)) this.THREE = G.THREE || G.three;
     }
-    for (const o of s.officers ?? []) weigh(o, o.pos.x, o.pos.z, 'officer');
-    if (!best) return false;
-    const fx = this.fxOf(s);
-    const at = best.target.pos;
-    fx?.burst?.(at.x, 1.3, at.z, 0xffd75e, 10);
-    if (best.kind === 'enemy') {
-      this.hurtEnemy(s, best.target, FIST_DAMAGE);
-    } else if (best.kind === 'ped') {
-      best.target.state = 'flee';
-      best.target.fleeTimer = 3;
-      best.target.fleeX = best.target.pos.x - hero.pos.x;
-      best.target.fleeZ = best.target.pos.z - hero.pos.z;
-      if (typeof s.scarePedestrians === 'function') s.scarePedestrians(s, hero.pos.x, hero.pos.z);
-      s.police?.addWanted?.(s, 1, 'assault');
-    } else {
-      best.target.health = clampHealth((best.target.health ?? 100) - FIST_DAMAGE);
-      s.police?.addWanted?.(s, 1, 'assault-officer');
-    }
-    return true;
   }
 
-  // -- pistol -----------------------------------------------------------
-  // Fire. Returns true when a shot went off (or a fist swing happened
-  // because the pistol was not the active weapon).
-  shoot(w) {
-    const s = this.world(w);
-    const hero = this.heroOf(w);
-    if (!hero || !s) return false;
-    if (hero.weapon !== 'pistol') return this.attack(w);
-    if (hero.car) return false;
-    if ((hero.shootCooldown ?? 0) > 0) return false;
-    if ((hero.ammo ?? 0) <= 0) {
-      this.audioOf(w)?.click?.();
-      this.hudOf(w)?.showMessage?.('Out of ammo — look for a dropped pistol.');
-      return false;
-    }
-    hero.shootCooldown = PISTOL_RATE;
-    hero.ammo -= 1;
-    const fx = this.fxOf(w);
-    const dir = facing(hero.heading);
-    const ox = hero.pos.x + dir.x * 0.6;
-    const oy = 1.45;
-    const oz = hero.pos.z + dir.z * 0.6;
-    fx?.muzzle?.(ox, oy, oz);
-    this.audioOf(w)?.gunshot?.();
-    // Find the closest hittable thing down the aim line.
-    let best = null;
-    let bestD = PISTOL_REACH;
-    const weigh = (target, x, z, kind) => {
-      const dx = x - hero.pos.x;
-      const dz = z - hero.pos.z;
-      const along = dx * dir.x + dz * dir.z;
-      if (along < 1 || along > bestD) return;
-      const sideways = Math.abs(dx * dir.z - dz * dir.x);
-      if (sideways > 1.1 + along * 0.02) return;
-      best = { target, kind, along };
-      bestD = along;
-    };
-    for (const e of this.enemies) weigh(e, e.pos.x, e.pos.z, 'enemy');
-    for (const p of s.peds ?? []) {
-      if (p.state === 'down') continue;
-      weigh(p, p.pos.x, p.pos.z, 'ped');
-    }
-    for (const o of s.officers ?? []) weigh(o, o.pos.x, o.pos.z, 'officer');
-    for (const c of s.policeCars ?? []) weigh(c, c.pos.x, c.pos.z, 'cruiser');
-    const ex = hero.pos.x + dir.x * bestD;
-    const ez = hero.pos.z + dir.z * bestD;
-    fx?.tracer?.(ox, oy, oz, ex, 1.2, ez);
-    if (!best) return true;
-    fx?.burst?.(best.target.pos.x, 1.3, best.target.pos.z, 0xff5a3c, 8);
-    if (best.kind === 'enemy') {
-      this.hurtEnemy(s, best.target, PISTOL_DAMAGE);
-    } else if (best.kind === 'ped') {
-      best.target.state = 'down';
-      s.police?.addWanted?.(s, 2, 'shooting');
-    } else if (best.kind === 'officer') {
-      best.target.health = clampHealth((best.target.health ?? 100) - PISTOL_DAMAGE);
-      s.police?.addWanted?.(s, 2, 'shooting-officer');
-    } else if (best.kind === 'cruiser') {
-      best.target.health = clampHealth((best.target.health ?? 100) - PISTOL_DAMAGE);
-    }
-    return true;
+  _sfx(name) {
+    const audio = this.G && this.G.audio;
+    if (!audio) return;
+    try {
+      if (typeof audio.play === 'function') audio.play(name);
+      else if (typeof audio[name] === 'function') audio[name]();
+      else if (typeof audio.sfx === 'function') audio.sfx(name);
+    } catch (err) { /* sound is never fatal */ }
   }
 
-  hurtEnemy(s, enemy, dmg) {
-    enemy.health -= dmg;
-    enemy.hitFlash = 0.12;
-    if (enemy.health > 0) return;
-    this.dropEnemy(s, enemy);
-  }
-
-  dropEnemy(s, enemy) {
-    const i = this.enemies.indexOf(enemy);
-    if (i !== -1) this.enemies.splice(i, 1);
-    const scene = this.sceneOf(s);
-    if (scene) scene.remove(enemy.mesh);
-    this.fxOf(s)?.burst?.(enemy.pos.x, 1.2, enemy.pos.z, 0xffd75e, 16);
-    this.audioOf(s)?.cash?.();
-    if (Math.random() < GUNMAN_DROP_ODDS) this.leavePickup(s, enemy.pos.x, enemy.pos.z);
-  }
-
-  // -- pickups ----------------------------------------------------------
-  leavePickup(s, x, z) {
-    const scene = this.sceneOf(s);
-    if (!scene) return;
-    const group = new THREE.Group();
-    const body = new THREE.Mesh(
-      new THREE.BoxGeometry(0.34, 0.1, 0.16),
-      new THREE.MeshLambertMaterial({ color: 0x222226 }),
-    );
-    body.position.y = 0.12;
-    group.add(body);
-    const glow = new THREE.Mesh(
-      new THREE.BoxGeometry(0.5, 0.04, 0.3),
-      new THREE.MeshBasicMaterial({ color: 0xffd75e, transparent: true, opacity: 0.55 }),
-    );
-    glow.position.y = 0.05;
-    group.add(glow);
-    group.position.set(x, 0, z);
-    scene.add(group);
-    const pickup = { kind: 'pistol', ammo: 12, pos: new THREE.Vector3(x, 0, z), mesh: group, life: 60 };
-    this.pickups.push(pickup);
-    if (Array.isArray(s.pickups)) s.pickups.push(pickup);
-  }
-
-  gatherPickups(s, hero) {
-    for (let i = this.pickups.length - 1; i >= 0; i--) {
-      const p = this.pickups[i];
-      p.life -= 1 / 60;
-      if (p.life <= 0) {
-        this.discardPickup(s, i);
-        continue;
+  _burst(x, y, z, kind, count) {
+    const fx = this.G && this.G.fx;
+    if (!fx) return;
+    try {
+      if (typeof fx.spawnBurst === 'function') { fx.spawnBurst(x, y, z, kind, count); return; }
+      if (typeof fx.spawnSpark === 'function') { fx.spawnSpark(x, y, z); return; }
+      if (typeof fx.addParticle === 'function') {
+        for (let i = 0; i < (count || 8); i++) fx.addParticle(x, y, z, kind);
+        return;
       }
-      const d = Math.hypot(p.pos.x - hero.pos.x, p.pos.z - hero.pos.z);
-      if (d > PICKUP_REACH) continue;
-      hero.weapon = 'pistol';
-      hero.hasPistol = true;
-      hero.ammo = (hero.ammo ?? 0) + p.ammo;
-      this.discardPickup(s, i);
-      this.hudOf(s)?.showMessage?.(`Picked up a pistol (+${p.ammo} rounds). Press Q to switch.`);
-      this.hudOf(s)?.renderWeapon?.(hero);
-      this.audioOf(s)?.chime?.();
+      if (Array.isArray(fx.particles)) {
+        for (let i = 0; i < (count || 8); i++) {
+          fx.particles.push({
+            x, y, z,
+            vx: (Math.random() - 0.5) * 6,
+            vy: Math.random() * 4 + 1,
+            vz: (Math.random() - 0.5) * 6,
+            life: 0.45 + Math.random() * 0.25,
+            kind: kind || 'spark',
+          });
+        }
+      }
+    } catch (err) { /* effects are never fatal */ }
+  }
+
+  _addToScene(mesh) {
+    const scene = this.G && this.G.scene;
+    if (!scene || typeof scene.add !== 'function' || !mesh) return false;
+    try { scene.add(mesh); return true; }
+    catch (err) { return false; }
+  }
+
+  _removeFromScene(mesh) {
+    const scene = this.G && this.G.scene;
+    if (!scene || typeof scene.remove !== 'function' || !mesh) return;
+    try { scene.remove(mesh); } catch (err) { /* ignore */ }
+  }
+
+  _hurtPlayer(amount) {
+    const G = this.G;
+    if (!G) return;
+    try {
+      if (typeof G.damagePlayer === 'function') { G.damagePlayer(amount); return; }
+      if (typeof G.hurtPlayer === 'function') { G.hurtPlayer(amount); return; }
+      if (typeof window !== 'undefined' && window.__game && typeof window.__game.hurt === 'function') {
+        window.__game.hurt(amount);
+        return;
+      }
+    } catch (err) { /* fall through to the direct path */ }
+    const player = this._player();
+    if (player && typeof player.health === 'number') {
+      player.health = Math.max(0, player.health - amount);
     }
   }
 
-  discardPickup(s, i) {
-    const p = this.pickups[i];
-    this.pickups.splice(i, 1);
-    const scene = this.sceneOf(s);
-    if (scene && p.mesh) scene.remove(p.mesh);
-    if (Array.isArray(s.pickups)) {
-      const j = s.pickups.indexOf(p);
-      if (j !== -1) s.pickups.splice(j, 1);
-    }
+  _say(text) {
+    const hud = this.G && this.G.hud;
+    if (!hud) return;
+    try {
+      if (typeof hud.feed === 'function') hud.feed(text);
+      else if (typeof hud.addFeed === 'function') hud.addFeed(text);
+      else if (typeof hud.showFeed === 'function') hud.showFeed(text);
+    } catch (err) { /* ignore */ }
   }
 
-  // -- enemies ----------------------------------------------------------
-  spawnEnemy(w, x, z) {
-    const s = this.world(w);
-    const scene = this.sceneOf(w);
-    if (!s || !scene) return null;
-    const enemy = new Gunman(scene, x, z);
-    this.enemies.push(enemy);
-    if (Array.isArray(s.enemies)) s.enemies.push(enemy);
-    else s.enemies = this.enemies;
-    return enemy;
-  }
+  // -- fists --------------------------------------------------------------
 
-  clearEnemies(w) {
-    const scene = this.sceneOf(w);
-    for (const e of this.enemies) if (scene) scene.remove(e.mesh);
-    this.enemies.length = 0;
-    const s = this.world(w);
-    if (s && Array.isArray(s.enemies)) s.enemies.length = 0;
-  }
+  // Throw a punch. Works only on foot; driving players cannot punch.
+  // Always produces a visible swing arc, even on a miss, so the player
+  // can see the attack happened. Returns true when a swing went out.
+  punch(G) {
+    if (G) this._useG(G);
+    const player = this._player();
+    if (!player || player.car) return false;
+    if (this.punchCooldown > 0) return false;
+    this.punchCooldown = PUNCH_COOLDOWN;
+    player.punchAnim = 1;
+    player.weapon = player.weapon || 'fists';
 
-  // -- weapons ----------------------------------------------------------
-  switchWeapon(w) {
-    const hero = this.heroOf(w);
-    if (!hero) return;
-    if (hero.weapon === 'pistol') {
-      hero.weapon = 'fists';
-    } else if (hero.hasPistol || (hero.ammo ?? 0) > 0) {
-      hero.weapon = 'pistol';
+    const heading = player.heading || 0;
+    const fwd = forwardOf(heading);
+    const px = player.pos.x;
+    const py = (player.pos.y || 0) + 1.25;
+    const pz = player.pos.z;
+    const ax = px + fwd.x * 1.15;
+    const az = pz + fwd.z * 1.15;
+
+    this.spawnPunchArc(ax, py, az, heading);
+    this._sfx('whoosh');
+
+    const victim = this._nearestPunchTarget(px, pz, heading);
+    if (victim) {
+      this.spawnSpark(victim.x, 1.2, victim.z);
+      this._say('Punch landed!');
+      this._sfx('punchHit');
+      this._damageTarget(victim, PUNCH_DAMAGE);
     } else {
-      this.hudOf(w)?.showMessage?.('No pistol yet — drop a gunman to get one.');
+      this._say('You swing at the air.');
+    }
+    return true;
+  }
+
+  tryPunch(G) { return this.punch(G); }
+  swing(G) { return this.punch(G); }
+  attack(G) {
+    if (G) this._useG(G);
+    const player = this._player();
+    if (player && player.weapon === 'pistol') return this.shoot();
+    return this.punch();
+  }
+
+  // The click handler main.js calls: fists punch, pistol fires.
+  handleClick() { return this.attack(); }
+  onMouseDown() { return this.attack(); }
+
+  _nearestPunchTarget(px, pz, heading) {
+    let best = null;
+    let bestD = PUNCH_REACH;
+    const consider = (obj, x, z) => {
+      if (!obj || obj.dead) return;
+      const dx = x - px;
+      const dz = z - pz;
+      const d = Math.hypot(dx, dz);
+      if (d > PUNCH_REACH || d < 0.01) return;
+      const ang = Math.abs(angleDiff(Math.atan2(dx, dz), heading));
+      if (ang > PUNCH_ARC / 2 + 0.35) return;
+      if (d < bestD) { bestD = d; best = obj; best.x = x; best.z = z; }
+    };
+    const G = this.G;
+    if (G && Array.isArray(G.peds)) {
+      for (const ped of G.peds) {
+        if (ped.state === 'down' || ped.fled) continue;
+        consider(ped, ped.pos.x, ped.pos.z);
+      }
+    }
+    if (G && Array.isArray(G.officers)) {
+      for (const officer of G.officers) consider(officer, officer.pos.x, officer.pos.z);
+    }
+    for (const gunman of this.gunmen) {
+      if (gunman.health > 0) consider(gunman, gunman.pos.x, gunman.pos.z);
+    }
+    return best;
+  }
+
+  _damageTarget(target, amount) {
+    if (typeof target.health === 'number') {
+      target.health -= amount;
+      if (target.health <= 0) {
+        target.dead = true;
+        if (target.state !== undefined) target.state = 'down';
+        if (this.gunmen.includes(target)) this._onGunmanDown(target);
+      }
+    } else {
+      // Pedestrians without a health field just go down.
+      target.dead = true;
+      if (target.state !== undefined) target.state = 'down';
+    }
+  }
+
+  // -- pistol ---------------------------------------------------------------
+
+  switchWeapon() {
+    const player = this._player();
+    if (!player) return 'fists';
+    if (player.weapon === 'pistol') {
+      player.weapon = 'fists';
+      this._say('Fists.');
+      return 'fists';
+    }
+    if ((player.ammo || 0) <= 0) {
+      this._say('Out of ammo — find a pistol pickup.');
+      this._sfx('dryFire');
+      return 'fists';
+    }
+    player.weapon = 'pistol';
+    this._say('Pistol out.');
+    this._sfx('draw');
+    return 'pistol';
+  }
+
+  toggleWeapon() { return this.switchWeapon(); }
+  setWeapon(name) {
+    const player = this._player();
+    if (!player) return;
+    if (name === 'pistol' && (player.ammo || 0) <= 0) {
+      this._say('Out of ammo — find a pistol pickup.');
+      player.weapon = 'fists';
       return;
     }
-    this.hudOf(w)?.renderWeapon?.(hero);
-    this.audioOf(w)?.click?.();
+    player.weapon = name === 'pistol' ? 'pistol' : 'fists';
   }
 
-  // Right a flipped car. Called from the R key; harmless when there is
-  // nothing to flip.
-  flipCar(w) {
-    const s = this.world(w);
-    const hero = this.heroOf(w);
-    const car = hero?.car ?? s?.player?.car;
-    if (!car || !car.mesh) return false;
-    car.mesh.rotation.set(0, car.heading ?? 0, 0);
+  // Fire the pistol straight ahead. Returns true when a shot went out.
+  shoot(G) {
+    if (G) this._useG(G);
+    const player = this._player();
+    if (!player || player.car) return false;
+    if (player.weapon !== 'pistol') return false;
+    if (this.shootCooldown > 0) return false;
+    if ((player.ammo || 0) <= 0) {
+      this._sfx('dryFire');
+      this._say('Click — out of ammo.');
+      this.shootCooldown = 0.3;
+      return false;
+    }
+    this.shootCooldown = PISTOL_COOLDOWN;
+    player.ammo -= 1;
+
+    const heading = player.heading || 0;
+    const fwd = forwardOf(heading);
+    const mx = player.pos.x + fwd.x * 0.9;
+    const my = (player.pos.y || 0) + 1.35;
+    const mz = player.pos.z + fwd.z * 0.9;
+    this.spawnMuzzleFlash(mx, my, mz);
+    this._sfx('shoot');
+
+    const hit = this._nearestShotTarget(player.pos.x, player.pos.z, heading);
+    const endX = hit ? hit.x : player.pos.x + fwd.x * PISTOL_RANGE;
+    const endZ = hit ? hit.z : player.pos.z + fwd.z * PISTOL_RANGE;
+    this.spawnTracer(mx, my, mz, endX, 1.2, endZ);
+    if (hit) {
+      this.spawnSpark(hit.x, 1.2, hit.z);
+      this._damageTarget(hit, 50);
+      this._say(hit === this._lastGunmanHit ? 'Gunman down!' : 'Hit!');
+    }
     return true;
   }
 
-  // -- per-frame --------------------------------------------------------
-  update(w, dt) {
-    const s = this.world(w);
-    if (!s) return;
-    const hero = this.heroOf(w);
-    if (this.punchTimer > 0) this.punchTimer -= dt;
-    if (this.punchAnim > 0) {
-      this.punchAnim = Math.max(0, this.punchAnim - dt * 3.2);
-      if (hero) hero.punchAnim = this.punchAnim;
+  firePistol() { return this.shoot(); }
+  fire() { return this.shoot(); }
+
+  _nearestShotTarget(px, pz, heading) {
+    let best = null;
+    let bestD = PISTOL_RANGE;
+    const consider = (obj, x, z) => {
+      if (!obj || obj.dead) return;
+      const dx = x - px;
+      const dz = z - pz;
+      const d = Math.hypot(dx, dz);
+      if (d > PISTOL_RANGE || d < 0.5) return;
+      const ang = Math.abs(angleDiff(Math.atan2(dx, dz), heading));
+      if (ang > 0.16) return;
+      if (d < bestD) { bestD = d; best = obj; best.x = x; best.z = z; }
+    };
+    const G = this.G;
+    if (G && Array.isArray(G.peds)) {
+      for (const ped of G.peds) {
+        if (ped.state === 'down' || ped.fled) continue;
+        consider(ped, ped.pos.x, ped.pos.z);
+      }
     }
-    if (hero && (hero.shootCooldown ?? 0) > 0) hero.shootCooldown -= dt;
-    const scene = this.sceneOf(w);
+    if (G && Array.isArray(G.officers)) {
+      for (const officer of G.officers) consider(officer, officer.pos.x, officer.pos.z);
+    }
+    for (const gunman of this.gunmen) {
+      if (gunman.health > 0) {
+        consider(gunman, gunman.pos.x, gunman.pos.z);
+        if (best === gunman) this._lastGunmanHit = gunman;
+      }
+    }
+    return best;
+  }
+
+  // -- gunmen ---------------------------------------------------------------
+
+  // Spawn an armed gang gunman at (x, z). He closes in, plants himself
+  // and fires in bursts until Cole leaves, is busted, or drops him.
+  spawnGunman(x, z, opts) {
+    const options = opts || {};
+    const gunman = {
+      kind: 'gunman',
+      pos: { x, y: 0, z },
+      x,
+      z,
+      heading: 0,
+      health: options.health || 100,
+      state: 'approach',
+      burstTimer: 0.6 + Math.random() * 0.8,
+      shotsLeft: 0,
+      shotTimer: 0,
+      speed: options.speed || 5.2,
+      dead: false,
+    };
+    this.gunmen.push(gunman);
+    this._buildGunmanMesh(gunman);
+    return gunman;
+  }
+
+  addGunman(x, z, opts) { return this.spawnGunman(x, z, opts); }
+  spawnEnemy(x, z, opts) { return this.spawnGunman(x, z, opts); }
+  spawnGangster(x, z, opts) { return this.spawnGunman(x, z, opts); }
+
+  _buildGunmanMesh(gunman) {
+    if (!this.G || !this.G.scene) return;
+    const T = this._T();
+    if (!T) return;
+    try {
+      const group = new T.Group();
+      const jacket = new T.Mesh(
+        new T.BoxGeometry(0.62, 0.85, 0.36),
+        new T.MeshLambertMaterial({ color: 0x5a1f1f })
+      );
+      jacket.position.y = 1.05;
+      const head = new T.Mesh(
+        new T.BoxGeometry(0.34, 0.34, 0.34),
+        new T.MeshLambertMaterial({ color: 0xc89878 })
+      );
+      head.position.y = 1.68;
+      const legs = new T.Mesh(
+        new T.BoxGeometry(0.5, 0.62, 0.3),
+        new T.MeshLambertMaterial({ color: 0x1c1c22 })
+      );
+      legs.position.y = 0.31;
+      const gun = new T.Mesh(
+        new T.BoxGeometry(0.08, 0.08, 0.5),
+        new T.MeshLambertMaterial({ color: 0x111111 })
+      );
+      gun.position.set(0.3, 1.25, 0.25);
+      group.add(jacket, head, legs, gun);
+      group.position.set(gunman.pos.x, 0, gunman.pos.z);
+      if (this._addToScene(group)) this._gunmanMeshes.set(gunman, group);
+    } catch (err) { /* a missing scene never blocks the logic */ }
+  }
+
+  _onGunmanDown(gunman) {
+    const mesh = this._gunmanMeshes.get(gunman);
+    if (mesh) {
+      this._removeFromScene(mesh);
+      this._gunmanMeshes.delete(gunman);
+    }
+    this._say('Gunman down!');
+    this._burst(gunman.pos.x, 1.0, gunman.pos.z, 'spark', 14);
+    // Sometimes he drops his pistol; a health pickup often lies near it.
+    if (Math.random() < 0.4) {
+      this.dropPickup('pistol', gunman.pos.x + 1.2, gunman.pos.z + 0.6);
+      if (Math.random() < 0.6) {
+        this.dropPickup('health', gunman.pos.x - 1.0, gunman.pos.z + 1.4);
+      }
+    } else if (Math.random() < 0.25) {
+      this.dropPickup('health', gunman.pos.x + 0.8, gunman.pos.z - 0.8);
+    }
+  }
+
+  _updateGunmen(dt) {
+    const player = this._player();
+    if (!player) return;
+    for (const gunman of this.gunmen) {
+      if (gunman.dead || gunman.health <= 0) continue;
+      const dx = player.pos.x - gunman.pos.x;
+      const dz = player.pos.z - gunman.pos.z;
+      const d = Math.hypot(dx, dz);
+      gunman.heading = Math.atan2(dx, dz);
+      const mesh = this._gunmanMeshes.get(gunman);
+      if (d > GUNMAN_APPROACH_RANGE) {
+        gunman.state = 'approach';
+      } else if (d > GUNMAN_PLANT_RANGE) {
+        gunman.state = 'approach';
+        const step = gunman.speed * dt;
+        gunman.pos.x += (dx / d) * step;
+        gunman.pos.z += (dz / d) * step;
+      } else {
+        gunman.state = 'planted';
+      }
+      if (mesh) {
+        mesh.position.set(gunman.pos.x, 0, gunman.pos.z);
+        mesh.rotation.y = gunman.heading;
+      }
+      if (gunman.state !== 'planted') continue;
+      if (player.car) continue; // gunmen hold fire on a moving car
+      if (gunman.shotsLeft > 0) {
+        gunman.shotTimer -= dt;
+        if (gunman.shotTimer <= 0) {
+          gunman.shotTimer = GUNMAN_SHOT_GAP;
+          gunman.shotsLeft -= 1;
+          this._gunmanShot(gunman, d);
+        }
+      } else {
+        gunman.burstTimer -= dt;
+        if (gunman.burstTimer <= 0) {
+          gunman.burstTimer = GUNMAN_BURST_GAP;
+          gunman.shotsLeft = GUNMAN_SHOTS_PER_BURST;
+          gunman.shotTimer = 0;
+        }
+      }
+    }
+    // Sweep the dead out of the list once their meshes are gone.
+    this.gunmen = this.gunmen.filter((g) => !g.dead || g.health > 0);
+  }
+
+  _gunmanShot(gunman, dist) {
+    const player = this._player();
+    if (!player) return;
+    const mx = gunman.pos.x + Math.sin(gunman.heading) * 0.7;
+    const mz = gunman.pos.z + Math.cos(gunman.heading) * 0.7;
+    this.spawnMuzzleFlash(mx, 1.3, mz);
+    this.spawnTracer(mx, 1.3, mz, player.pos.x, 1.2, player.pos.z);
+    this._sfx('enemyShoot');
+    if (Math.random() < GUNMAN_HIT_CHANCE) {
+      this._hurtPlayer(GUNMAN_SHOT_DAMAGE);
+      this._say('You\'re hit!');
+      if (this.G && this.G.hud && typeof this.G.hud.flashDamage === 'function') {
+        this.G.hud.flashDamage();
+      }
+    }
+  }
+
+  clearGunmen() {
+    for (const gunman of this.gunmen) {
+      const mesh = this._gunmanMeshes.get(gunman);
+      if (mesh) this._removeFromScene(mesh);
+    }
+    this._gunmanMeshes.clear();
+    this.gunmen = [];
+  }
+
+  // -- pickups --------------------------------------------------------------
+
+  dropPickup(kind, x, z) {
+    const pickup = { kind, x, y: 0.5, z, life: 120 };
+    this.pickups.push(pickup);
+    if (this.G) this.G.pickups = this.pickups;
+    return pickup;
+  }
+
+  addPickup(kind, x, z) { return this.dropPickup(kind, x, z); }
+
+  _updatePickups(dt) {
+    const player = this._player();
+    if (!player) return;
+    for (let i = this.pickups.length - 1; i >= 0; i--) {
+      const pickup = this.pickups[i];
+      pickup.life -= dt;
+      if (pickup.life <= 0) { this.pickups.splice(i, 1); continue; }
+      if (player.car) continue;
+      const d = Math.hypot(player.pos.x - pickup.x, player.pos.z - pickup.z);
+      if (d > 1.8) continue;
+      this.pickups.splice(i, 1);
+      if (pickup.kind === 'pistol') {
+        player.ammo = (player.ammo || 0) + PISTOL_AMMO;
+        this._say(`Picked up a pistol (+${PISTOL_AMMO} ammo).`);
+        this._sfx('pickup');
+      } else if (pickup.kind === 'health') {
+        player.health = Math.min(100, (player.health || 100) + 40);
+        this._say('Picked up a medkit (+40 health).');
+        this._sfx('pickup');
+      } else if (pickup.kind === 'ammo') {
+        player.ammo = (player.ammo || 0) + PISTOL_AMMO;
+        this._say(`Picked up ammo (+${PISTOL_AMMO}).`);
+        this._sfx('pickup');
+      }
+    }
+  }
+
+  // -- effects (plain numbers in, plain numbers out) ------------------------
+
+  spawnPunchArc(x, y, z, angle) {
+    const arc = { x, y, z, angle, life: 0.28, maxLife: 0.28 };
+    this.arcs.push(arc);
+    const T = this._T();
+    if (!T) return arc;
+    try {
+      const geo = new T.TorusGeometry(1.05, 0.045, 6, 14, Math.PI * 0.75);
+      const mat = new T.MeshBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0.95 });
+      const mesh = new T.Mesh(geo, mat);
+      mesh.position.set(x, y, z);
+      mesh.rotation.set(Math.PI / 2, 0, -angle + Math.PI * 0.12);
+      if (this._addToScene(mesh)) {
+        arc.mesh = mesh;
+        this._arcMeshes.push(mesh);
+      }
+    } catch (err) { /* visual only */ }
+    return arc;
+  }
+
+  spawnMuzzleFlash(x, y, z) {
+    const flash = { x, y, z, life: 0.07, maxLife: 0.07 };
+    this.flashes.push(flash);
+    this._burst(x, y, z, 'flash', 3);
+    const T = this._T();
+    if (!T) return flash;
+    try {
+      const mesh = new T.Mesh(
+        new T.SphereGeometry(0.22, 8, 6),
+        new T.MeshBasicMaterial({ color: 0xffd76a, transparent: true, opacity: 1 })
+      );
+      mesh.position.set(x, y, z);
+      if (this._addToScene(mesh)) {
+        flash.mesh = mesh;
+        this._flashMeshes.push(mesh);
+      }
+    } catch (err) { /* visual only */ }
+    return flash;
+  }
+
+  spawnTracer(x, y, z, tx, ty, tz) {
+    const tracer = { x1: x, y1: y, z1: z, x2: tx, y2: ty, z2: tz, life: 0.09, maxLife: 0.09 };
+    this.tracers.push(tracer);
+    const T = this._T();
+    if (!T) return tracer;
+    try {
+      const dx = tx - x, dy = ty - y, dz = tz - z;
+      const len = Math.hypot(dx, dy, dz) || 1;
+      const geo = new T.CylinderGeometry(0.02, 0.02, len, 5, 1, true);
+      const mat = new T.MeshBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0.9 });
+      const mesh = new T.Mesh(geo, mat);
+      mesh.position.set((x + tx) / 2, (y + ty) / 2, (z + tz) / 2);
+      mesh.quaternion.setFromUnitVectors(
+        new T.Vector3(0, 1, 0),
+        new T.Vector3(dx / len, dy / len, dz / len)
+      );
+      if (this._addToScene(mesh)) {
+        tracer.mesh = mesh;
+        this._tracerMeshes.push(mesh);
+      }
+    } catch (err) { /* visual only */ }
+    return tracer;
+  }
+
+  spawnSpark(x, y, z) {
+    this._burst(x, y, z, 'spark', 12);
+    return { x, y, z };
+  }
+
+  // -- per-frame update -------------------------------------------------------
+
+  update(dt) {
+    if (this.punchCooldown > 0) this.punchCooldown -= dt;
+    if (this.shootCooldown > 0) this.shootCooldown -= dt;
+    const player = this._player();
+    if (player && typeof player.punchAnim === 'number' && player.punchAnim > 0) {
+      player.punchAnim = Math.max(0, player.punchAnim - dt * 3.2);
+    }
     for (let i = this.arcs.length - 1; i >= 0; i--) {
-      if (!this.arcs[i].tick(dt)) {
-        this.arcs[i].remove(scene);
+      const arc = this.arcs[i];
+      arc.life -= dt;
+      if (arc.mesh) arc.mesh.material.opacity = Math.max(0, arc.life / arc.maxLife);
+      if (arc.life <= 0) {
+        if (arc.mesh) { this._removeFromScene(arc.mesh); }
         this.arcs.splice(i, 1);
       }
     }
-    if (hero && !hero.car) this.gatherPickups(s, hero);
-    if (!hero || hero.car) return;
-    for (const e of [...this.enemies]) this.stepEnemy(s, e, hero, dt);
-  }
-
-  stepEnemy(s, e, hero, dt) {
-    const d = Math.hypot(hero.pos.x - e.pos.x, hero.pos.z - e.pos.z);
-    if (e.hitFlash > 0) e.hitFlash -= dt;
-    if (d > GUNMAN_SHOOT_FROM) {
-      e.mode = 'chase';
-      e.strideToward(s, hero.pos.x, hero.pos.z, GUNMAN_WALK, dt);
-    } else if (d > GUNMAN_PLANT_AT) {
-      e.mode = 'chase';
-      e.strideToward(s, hero.pos.x, hero.pos.z, GUNMAN_WALK * 0.8, dt);
-    } else {
-      e.mode = 'shoot';
-      e.heading = bearing(e.pos.x, e.pos.z, hero.pos.x, hero.pos.z);
-      e.mesh.rotation.y = e.heading;
-      e.strafeIn -= dt;
-      if (e.strafeIn <= 0) {
-        e.strafe *= -1;
-        e.strafeIn = 1.5 + Math.random() * 1.5;
+    for (let i = this.tracers.length - 1; i >= 0; i--) {
+      const tracer = this.tracers[i];
+      tracer.life -= dt;
+      if (tracer.mesh) tracer.mesh.material.opacity = Math.max(0, tracer.life / tracer.maxLife);
+      if (tracer.life <= 0) {
+        if (tracer.mesh) this._removeFromScene(tracer.mesh);
+        this.tracers.splice(i, 1);
       }
-      const side = facing(e.heading + Math.PI / 2);
-      e.pos.x += side.x * e.strafe * 0.7 * dt;
-      e.pos.z += side.z * e.strafe * 0.7 * dt;
-      e.mesh.position.set(e.pos.x, 0, e.pos.z);
-      this.enemyFire(s, e, hero, d, dt);
     }
-    if (e.armR) e.armR.rotation.x = e.mode === 'shoot' ? -1.35 : -1.1;
-  }
-
-  enemyFire(s, e, hero, dist, dt) {
-    if (e.shotsLeft > 0) {
-      e.shotGap -= dt;
-      if (e.shotGap <= 0) {
-        e.shotGap = 0.16;
-        e.shotsLeft -= 1;
-        this.enemyShot(s, e, hero, dist);
+    for (let i = this.flashes.length - 1; i >= 0; i--) {
+      const flash = this.flashes[i];
+      flash.life -= dt;
+      if (flash.life <= 0) {
+        if (flash.mesh) this._removeFromScene(flash.mesh);
+        this.flashes.splice(i, 1);
       }
-      return;
     }
-    e.nextBurstIn -= dt;
-    if (e.nextBurstIn <= 0) {
-      e.shotsLeft = 3;
-      e.shotGap = 0;
-      e.nextBurstIn = 1.6 + Math.random() * 1.2;
-    }
-  }
-
-  enemyShot(s, e, hero, dist) {
-    const fx = this.fxOf(s);
-    const dir = facing(e.heading);
-    const ox = e.pos.x + dir.x * 0.5;
-    const oz = e.pos.z + dir.z * 0.5;
-    fx?.muzzle?.(ox, 1.35, oz);
-    fx?.tracer?.(ox, 1.35, oz, hero.pos.x, 1.3, hero.pos.z);
-    this.audioOf(s)?.gunshot?.();
-    // Far shots mostly miss; close ones usually do not.
-    const hitOdds = dist < 6 ? 0.75 : dist < 12 ? 0.5 : 0.3;
-    if (Math.random() > hitOdds) return;
-    if ((hero.invuln ?? 0) > 0) return;
-    hero.health = Math.max(0, (hero.health ?? 100) - GUNMAN_SHOT_HURT);
-    hero.invuln = 0.7;
-    this.hudOf(s)?.flashDamage?.();
-    this.hudOf(s)?.renderHealth?.(hero);
-    s.police?.addWanted?.(s, 1, 'shot-at');
+    this._updateGunmen(dt);
+    this._updatePickups(dt);
   }
 }
+
+export { Combat as CombatSystem };
+export default Combat;

@@ -3,9 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Neon Harbor — Open World Crime Game</title>
-<link rel="icon" href="data:,">
-<link rel="stylesheet" href="style.css">
+<title>Neon Harbor — an open-world crime game</title>
+<link rel="stylesheet" href="./style.css">
 <script type="importmap">
 {
   "imports": {
@@ -16,100 +15,124 @@
 </head>
 <body>
 <div id="app">
-  <canvas id="scene"></canvas>
+  <div id="scene"></div>
+
+  <!-- In-game HUD -->
   <div id="hud" class="hidden">
     <div id="hud-top-left">
-      <div id="health-wrap"><div id="health-bar"></div><span id="health-text">100</span></div>
+      <div id="health-wrap">
+        <div id="health-bar"></div>
+        <span id="health-text">100</span>
+      </div>
       <div id="cash">$<span id="cash-text">0</span></div>
-      <div id="ammo" class="hidden">PISTOL <span id="ammo-text">12</span></div>
+      <div id="ammo">Ammo <span id="ammo-text">—</span></div>
     </div>
     <div id="hud-top-right">
-      <div id="stars"></div>
+      <div id="stars">☆☆☆☆☆</div>
       <div id="mission-name"></div>
+      <div id="objective"></div>
+      <div id="race-status"></div>
     </div>
-    <div id="objective"></div>
-    <div id="race-status" class="hidden"></div>
-    <div id="crosshair" class="hidden"><span class="ch"></span><span class="ch"></span><span class="ch"></span><span class="ch"></span></div>
-    <canvas id="minimap" width="190" height="190"></canvas>
-    <div id="speed" class="hidden"><span id="speed-text">0</span> mph</div>
-    <div id="car-health" class="hidden">CAR <span id="car-health-text">100</span>%</div>
+    <div id="crosshair">+</div>
+    <canvas id="minimap" width="176" height="176"></canvas>
+    <div id="speed"><span id="speed-text">0 mph</span></div>
+    <div id="car-health">Car <span id="car-health-text">—</span></div>
     <div id="feed"></div>
     <div id="hint"></div>
-    <div id="vignette"></div>
-    <div id="interact" class="hidden">Press E</div>
+    <div id="interact"></div>
   </div>
+  <div id="vignette"></div>
+
+  <!-- Title screen -->
   <div id="title-screen" class="screen">
-    <div class="card title-card">
-      <h1>NEON <span>HARBOR</span></h1>
-      <p class="tagline">A sun-soaked city. A getaway driver with nothing to lose.</p>
-      <p class="story">Cole Vance just rolled into Neon Harbor with a fast car and a faster reputation.
-      His fixer Mara Quinn has work. Rival boss Dario Venn wants him gone.
-      Five jobs stand between Cole and the big score.</p>
-      <div class="keys-grid">
-        <div><b>W A S D</b> move / drive</div><div><b>Mouse</b> look / aim</div>
-        <div><b>Shift</b> sprint</div><div><b>Space</b> jump / handbrake</div>
-        <div><b>E</b> enter / exit car</div><div><b>Click</b> punch / shoot</div>
-        <div><b>Q</b> switch weapon</div><div><b>R</b> flip car upright</div>
-        <div><b>F</b> Pay N Spray (on the pad)</div><div><b>T</b> pick up a taxi fare</div>
-        <div><b>G</b> street race</div><div><b>C</b> courier job</div>
-        <div><b>P / Esc</b> pause</div><div><b>M</b> mute</div>
+    <div class="card">
+      <h1>NEON HARBOR</h1>
+      <p class="tagline">Steal it. Drive it. Lose them.</p>
+      <p class="story">Cole Vance is the best getaway driver in Neon Harbor, a
+      sun-soaked coastal city of downtown towers, a harbor pier, and quiet
+      residential streets. His fixer Mara Quinn has five jobs for him —
+      and rival boss Dario Venn wants every one of them stopped. Take the
+      jobs, take the cars, and do not get caught.</p>
+      <div class="keys">
+        <div><b>WASD</b> walk / drive</div>
+        <div><b>Mouse</b> look (click to capture, or drag)</div>
+        <div><b>Shift</b> sprint</div>
+        <div><b>Space</b> jump / handbrake</div>
+        <div><b>E</b> steal / exit car · Pay N Spray</div>
+        <div><b>Click</b> punch / shoot</div>
+        <div><b>Q</b> fists / pistol</div>
+        <div><b>R</b> restart mission</div>
+        <div><b>F</b> Pay N Spray</div>
+        <div><b>T</b> taxi job</div>
+        <div><b>C</b> courier job</div>
+        <div><b>G</b> street race</div>
+        <div><b>P / Esc</b> pause</div>
+        <div><b>M</b> mute</div>
       </div>
-      <div class="row">
-        <button id="btn-start" class="btn big">START</button>
-        <button id="btn-continue" class="btn hidden">CONTINUE</button>
-      </div>
-      <p class="fine">Neon Harbor is an original game. No real city, person or brand appears in it.</p>
+      <button id="btn-start" class="big">START</button>
+      <button id="btn-continue" class="big hidden">CONTINUE</button>
+      <p class="fineprint">An original game made for the make.fun gta6-01
+      competition. Neon Harbor, its people, and its story are invented;
+      no real city, person, or brand appears in it.</p>
     </div>
   </div>
+
+  <!-- Pause menu -->
   <div id="pause-menu" class="screen hidden">
     <div class="card">
-      <h2>PAUSED</h2>
-      <div class="row stack">
-        <button id="btn-resume" class="btn big">RESUME</button>
-        <button id="btn-restart-mission" class="btn">RESTART MISSION</button>
-        <button id="btn-save" class="btn">SAVE GAME</button>
-        <button id="btn-quit-title" class="btn">QUIT TO TITLE</button>
-      </div>
-      <p class="fine" id="pause-save-note"></p>
+      <h2>Paused</h2>
+      <button id="btn-resume" class="big">RESUME</button>
+      <button id="btn-restart-mission">Restart mission</button>
+      <button id="btn-save">Save game</button>
+      <span id="pause-save-note"></span>
+      <button id="btn-quit-title">Quit to title</button>
     </div>
   </div>
+
+  <!-- Mission complete -->
   <div id="mission-panel" class="screen hidden">
     <div class="card">
-      <h2 id="mission-panel-title">MISSION COMPLETE</h2>
+      <h2 id="mission-panel-title">Mission Complete</h2>
       <p id="mission-panel-text"></p>
       <p id="mission-panel-reward"></p>
-      <div class="row"><button id="btn-mission-ok" class="btn big">CONTINUE</button></div>
+      <button id="btn-mission-ok" class="big">CONTINUE</button>
     </div>
   </div>
+
+  <!-- Busted -->
   <div id="busted-screen" class="screen hidden">
-    <div class="card danger">
+    <div class="card">
       <h2>BUSTED</h2>
-      <p>The Harbor PD hauled you in. You lost some cash on bail.</p>
-      <div class="row"><button id="btn-busted" class="btn big">RESPAWN</button></div>
+      <p>The police caught up with you. Mara paid your bail — it cost you $25.</p>
+      <button id="btn-busted" class="big">BACK TO THE STREETS</button>
     </div>
   </div>
+
+  <!-- Wasted -->
   <div id="wasted-screen" class="screen hidden">
-    <div class="card danger">
+    <div class="card">
       <h2>WASTED</h2>
-      <p>You woke up at St. Aurelia Hospital, patched up and poorer.</p>
-      <div class="row"><button id="btn-wasted" class="btn big">RESPAWN</button></div>
+      <p>You wake up in the hospital, $25 lighter, with the city still waiting.</p>
+      <button id="btn-wasted" class="big">BACK TO THE STREETS</button>
     </div>
   </div>
+
+  <!-- Ending -->
   <div id="ending-screen" class="screen hidden">
     <div class="card">
       <h2>THE BIG ONE — DONE</h2>
-      <p>Cole Vance drove the Harbor Bank van clean through every roadblock Dario Venn
-      could buy. Mara Quinn is already counting the take. Neon Harbor is yours now —
-      keep driving, keep the heat low, and enjoy the sunset.</p>
       <p id="ending-stats"></p>
-      <div class="row"><button id="btn-ending" class="btn big">FREE ROAM</button></div>
+      <p>Dario Venn is finished in this city. Neon Harbor is yours, Cole.</p>
+      <button id="btn-ending" class="big">FREE ROAM</button>
     </div>
   </div>
+
+  <!-- Mission briefing -->
   <div id="briefing" class="screen hidden">
     <div class="card">
-      <h2 id="briefing-title"></h2>
+      <h2 id="briefing-title">Briefing</h2>
       <p id="briefing-text"></p>
-      <div class="row"><button id="btn-briefing" class="btn big">GO</button></div>
+      <button id="btn-briefing" class="big">GO</button>
     </div>
   </div>
 </div>

@@ -1,26 +1,46 @@
-// Neon Harbor — make.fun gta6-01 entrypoint (Node 22, stdlib only).
+// main.ts — the Neon Harbor entry program (Node 22, standard library only).
 //
-// The playable game is a folder of static files: game/index.html plus
-// its ES modules, with three.js vendored under game/vendor/, so a
-// desktop browser runs it with no network at all. This program packs
-// that folder together with the four screenshots into the directory
-// the grader reads, then writes the dossier.json summary with the
-// vendored make.fun library.
+// It packs the game folder and the four screenshots into the output
+// folder and writes dossier.json, the summary the judge reads, using the
+// vendored make.fun library. The output folder starts clean every run, so
+// a stale file from an earlier build can never ride along.
 //
-// Run from this directory as `MAKEFUN_OUTPUT_DIR=out node main.ts`.
-// With no variable set it writes to /output, the path the grader mounts.
-import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+// Run it with:
+//   MAKEFUN_OUTPUT_DIR=out node main.ts
+// (Outside the grader's container MAKEFUN_OUTPUT_DIR stands in for
+// /output; with no variable set, /output is used.)
+//
+// The four screenshots, in order, are the submission's cover and scenes:
+//   1-chase.jpg    — the cover: Cole driving the Comet GT downtown,
+//                    police in pursuit, 3 wanted stars.
+//   2-title.jpg    — the title screen over the city.
+//   3-drive.jpg    — driving through the streets.
+//   4-mission.jpg  — the mission-complete panel after The Pickup:
+//                    reward $300, total cash $450.
+
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
 
-// The scorer's caps (from reference/gate.json). text_max_bytes is the
-// only cap that changes bytes; the rest refuse an entry outright: more
-// than 4 screenshots or one over 256 KiB, more than 993 files under
-// game/, more than 48 MiB of game files, or any game/ path longer
-// than 1000 bytes. game/ is counted beside the output folder's own
-// limits, its screenshots/ folder and dossier.json.
-const GATE = {
+const here = fileURLToPath(new URL('.', import.meta.url));
+const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const gameDir = join(here, 'game');
+const shotsDir = join(here, 'screenshots');
+
+// The scorer's caps: text_max_bytes shapes the bytes; the rest refuse an
+// entry the scorer would refuse — more than 4 screenshots, one over
+// 256 KiB, more than 993 files under game/, more than 48 MiB of game
+// files in all, or a game path over 1000 bytes.
+const CAPS = {
   text_max_bytes: 163840,
   screenshots: { max: 4, max_bytes: 262144 },
   game_max_files: 993,
@@ -28,42 +48,63 @@ const GATE = {
   game_path_max_bytes: 1000,
 };
 
-const SCREENSHOT_NAMES = ['1-chase.jpg', '2-title.jpg', '3-drive.jpg', '4-mission.jpg'];
+const SHOT_ORDER = ['1-chase.jpg', '2-title.jpg', '3-drive.jpg', '4-mission.jpg'];
 
-// Where the repo lives, and where the grader expects the bundle.
-function resolvePaths() {
-  const root = dirname(fileURLToPath(import.meta.url));
-  const dest = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
-  return { root, dest };
+function fail(message) {
+  console.error('main.ts: ' + message);
+  process.exit(1);
 }
 
-// Start from a clean output folder so a stale file from an earlier
-// bundle can never ride along into the graded entry.
-function resetDir(path) {
-  rmSync(path, { recursive: true, force: true });
-  mkdirSync(path, { recursive: true });
+// Check the screenshots exist, in order, and inside the size cap, before
+// anything is copied — a missing or oversized shot fails here, loudly,
+// instead of producing a dossier the scorer rejects.
+function checkShots() {
+  if (!existsSync(shotsDir)) fail('screenshots/ folder is missing next to main.ts');
+  const found = readdirSync(shotsDir)
+    .filter((name) => /\.(jpe?g|png)$/i.test(name))
+    .sort();
+  if (found.length === 0) fail('no screenshots found in screenshots/');
+  if (found.length > CAPS.screenshots.max) {
+    fail(`found ${found.length} screenshots, the cap is ${CAPS.screenshots.max}`);
+  }
+  for (const name of SHOT_ORDER) {
+    if (!found.includes(name)) fail(`missing screenshot ${name}`);
+  }
+  for (const name of found) {
+    const size = statSync(join(shotsDir, name)).size;
+    if (size > CAPS.screenshots.max_bytes) {
+      fail(`screenshot ${name} is ${size} bytes, over the ${CAPS.screenshots.max_bytes} cap`);
+    }
+  }
+  return found;
 }
 
-// Copy the playable game and the four screenshots into the bundle.
-function packBundle({ root, dest }) {
-  resetDir(dest);
-  cpSync(join(root, 'game'), join(dest, 'game'), { recursive: true });
-  const shotsOut = join(dest, 'screenshots');
-  mkdirSync(shotsOut, { recursive: true });
-  const shotsIn = join(root, 'screenshots');
-  if (!existsSync(shotsIn)) return;
-  for (const name of SCREENSHOT_NAMES) {
-    const src = join(shotsIn, name);
-    if (existsSync(src)) cpSync(src, join(shotsOut, name));
+function checkGame() {
+  if (!existsSync(gameDir)) fail('game/ folder is missing next to main.ts');
+  if (!existsSync(join(gameDir, 'index.html'))) fail('game/index.html is missing');
+}
+
+// Start from a clean output folder, then copy the game and the shots in.
+function pack(shots) {
+  rmSync(outDir, { recursive: true, force: true });
+  mkdirSync(outDir, { recursive: true });
+  cpSync(gameDir, join(outDir, 'game'), { recursive: true });
+  mkdirSync(join(outDir, 'screenshots'), { recursive: true });
+  for (const name of shots) {
+    cpSync(join(shotsDir, name), join(outDir, 'screenshots', name));
   }
 }
 
-// Summarise the bundle into dossier.json for the scorer.
-function writeDossier(dest) {
-  const dossier = buildDossier(dest, GATE);
-  writeFileSync(join(dest, 'dossier.json'), dossier);
+function main() {
+  const shots = checkShots();
+  checkGame();
+  pack(shots);
+  const dossier = buildDossier(outDir, CAPS);
+  writeFileSync(join(outDir, 'dossier.json'), dossier);
+  console.log(`Neon Harbor packed to ${outDir}`);
+  console.log(`  game files copied from game/`);
+  console.log(`  screenshots: ${shots.join(', ')}`);
+  console.log(`  dossier.json written`);
 }
 
-const paths = resolvePaths();
-packBundle(paths);
-writeDossier(paths.dest);
+main();

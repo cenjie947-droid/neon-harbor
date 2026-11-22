@@ -1,210 +1,168 @@
-// Neon Harbor — shared state: world constants, the live game object,
-// and the geometry helpers every other module leans on.
-//
-// This file owns the numbers, not the behaviour. The city size, the road
-// grid, the shape of the central game object and the collision routines
-// all live here so the rest of the codebase reads them from one place
-// instead of each module inventing its own copy.
+// Neon Harbor — shared game state (round 6 fresh rewrite).
+// Owns the single state object every module reads and writes. Nothing in
+// here touches the DOM, the renderer, or the network: it is plain data
+// plus the tiny helpers that keep the cash / heat / job ledgers consistent.
+// The factory takes THREE so the player position can be a real Vector3
+// (other modules call .set() / .x / .z on it) without this file importing
+// the vendored three.js build itself.
 
-import * as THREE from 'three';
+export function createGameState(THREE) {
+  // Landmark spots, shared by city building, missions, jobs and the HUD.
+  // Keys must stay exactly these ten: the test driver asserts the set.
+  const markers = {
+    bank: { x: -60, z: -60 },
+    beach: { x: 0, z: 212 },
+    docks: { x: -150, z: 110 },
+    garage: { x: -120, z: 60 },
+    hideout: { x: 0, z: -180 },
+    hospital: { x: 120, z: -120 },
+    paintShop: { x: 60, z: 120 },
+    showroom: { x: 180, z: 60 },
+    spray: { x: 120, z: 60 },
+    warehouse: { x: -180, z: 120 },
+  };
 
-// The playable square is 480 m across; the beach and the sea sit along
-// its southern edge, past z = 198.
-export const WORLD = {
-  half: 240,
-  roadWidth: 10,
-  waterZ: 218,
-  sandZ: 198,
-  gridStep: 60,
-  gridMin: -180,
-  gridMax: 180,
-};
-
-// Road centre-lines, shared by the X roads and the Z roads alike.
-const GRID_LINES = [];
-for (let v = WORLD.gridMin; v <= WORLD.gridMax; v += WORLD.gridStep) {
-  GRID_LINES.push(v);
-}
-
-// A brand-new game object. Main attaches the three.js handles (scene,
-// camera, renderer, sun, sea, ferris) and the subsystem handles (player,
-// hud, audio, fx, police, combat, missions, save) once those exist;
-// until then they stay null so nothing reads a half-built system.
-export function makeGame() {
-  return {
-    // Run state.
-    mode: 'title',
+  const G = {
+    // --- clock -----------------------------------------------------------
+    // Game seconds since the run started. Advances only while playing.
     time: 0,
+
+    // --- the player ------------------------------------------------------
+    player: {
+      pos: new THREE.Vector3(0, 0, -150),
+      heading: 0, // facing, radians; 0 = +z (south), PI = -z (north)
+      speed: 0,
+      camYaw: 0,
+      camPitch: -0.32,
+      punchAnim: 0, // seconds left of the swing animation
+      shootCooldown: 0,
+      ammo: 0,
+      invuln: 0, // seconds of post-hit / post-respawn grace
+      walkPhase: 0, // leg-swing phase while walking
+      hasPistol: false,
+      weapon: 'fists', // 'fists' | 'pistol'
+      car: null, // the car record being driven, or null on foot
+      onGround: true,
+      vy: 0, // vertical velocity while jumping / falling
+      moving: false, // set each frame by the player controller
+    },
+
+    // --- world collections ----------------------------------------------
+    cars: [], // every traffic / parked / mission car record
+    policeCars: [], // cruisers chasing Cole (records live in cars too)
+    officers: [], // foot officers who can grab Cole
+    peds: [], // pedestrians
+    colliders: [], // { x, z, hw, hd } axis-aligned building boxes
+
+    // --- ledgers ---------------------------------------------------------
+    wanted: 0, // 0..5 stars
     cash: 0,
-    wanted: 0,
-    heatTimer: 0,
+    health: 100,
 
-    // Story progress.
-    missionIndex: 0,
-    missionStep: 0,
-    missionActive: false,
-    missionDone: false,
-    missionTimer: 0,
+    // --- story progress --------------------------------------------------
+    mission: 0, // index of the current story mission (0-based)
+    missionStep: 0, // beat inside the current mission
+    missionActive: false, // true while a story mission is running
 
-    // Taxi side job (free roam).
-    taxi: { phase: 'none', fare: 0, client: null, dest: null, waitTimer: 8 },
+    // --- free-roam jobs --------------------------------------------------
+    taxi: {
+      phase: 'idle', // idle | wait | ride | done
+      client: null, // pedestrian record waiting for a cab
+      dest: null, // marker record { key, x, z }
+      fare: 0,
+      timer: 0,
+    },
+    courier: {
+      phase: 'idle', // idle | carry
+      dest: null, // marker record { key, x, z }
+      reward: 0,
+      timer: 0, // seconds left on the 90 s drop-off clock
+      hasParcel: false,
+    },
+    race: {
+      phase: 'idle', // idle | countdown | running | done
+      gate: 0, // next checkpoint index
+      timer: 0, // seconds left on the 90 s race clock
+      checkpoints: [], // [{ x, z }] filled when a race starts
+      countdown: 0,
+    },
 
-    // Navigation aids.
-    beacon: null,
-    beaconTarget: null,
-
-    // City data, filled in by city.js.
-    markers: {},
-    roads: { xs: [...GRID_LINES], zs: [...GRID_LINES] },
-    colliders: [],
-
-    // Live entities.
-    cars: [],
-    traffic: [],
-    peds: [],
-    policeCars: [],
-    officers: [],
-    enemies: [],
-    cometGT: null,
-    bankVan: null,
-
-    // Lifetime totals shown on the ending screen.
-    stats: { carsStolen: 0, missionsDone: 0, crimes: 0 },
-
-    // Input state, fed by main's listeners.
-    input: { keys: new Set(), mouseDX: 0, mouseDY: 0 },
-
-    // Subsystem handles, attached by main after construction.
-    player: null,
+    // --- module handles (filled in by main as systems boot) -------------
+    markers,
+    city: null,
+    vehicles: null,
+    playerController: null,
+    pedsSystem: null,
+    fx: null, // effects system
+    audio: null, // audio system
     hud: null,
-    audio: null,
-    fx: null,
+    missions: null,
     police: null,
     combat: null,
-    missions: null,
     save: null,
 
-    // Three.js handles, attached by main.
-    scene: null,
-    camera: null,
-    renderer: null,
-    sun: null,
-    sea: null,
-    ferris: null,
-
-    // Rendering switch used by the headless test driver.
-    renderEnabled: true,
-    _render: true,
+    // --- heat bookkeeping (owned by the police module) -------------------
+    heat: {
+      unseenFor: 0, // seconds since any police unit last saw Cole
+      lastSeenAt: -999,
+    },
   };
+
+  return G;
 }
 
-// --- small maths ----------------------------------------------------------
-
-export function clamp(v, lo, hi) {
-  if (v < lo) return lo;
-  if (v > hi) return hi;
-  return v;
+// Bank cash through the one ledger every job and mission shares, so a
+// mission-complete card and the HUD can never disagree about the total:
+// both read G.cash after this runs. Returns the new total.
+export function bankCash(G, amount) {
+  G.cash = Math.max(0, G.cash + amount);
+  return G.cash;
 }
 
-export function rand(lo, hi) {
-  return lo + Math.random() * (hi - lo);
-}
-
-export function randInt(lo, hi) {
-  return Math.floor(lo + Math.random() * (hi - lo + 1));
-}
-
-export function pick(arr) {
-  return arr[(Math.random() * arr.length) | 0];
-}
-
-export function dist2D(x1, z1, x2, z2) {
-  const dx = x2 - x1;
-  const dz = z2 - z1;
-  return Math.sqrt(dx * dx + dz * dz);
-}
-
-// Interpolate between two headings along the shortest arc.
-export function angleLerp(a, b, t) {
-  let d = b - a;
-  while (d > Math.PI) d -= Math.PI * 2;
-  while (d < -Math.PI) d += Math.PI * 2;
-  return a + d * clamp(t, 0, 1);
-}
-
-export function inWorldBounds(x, z) {
-  const h = WORLD.half;
-  return x >= -h && x <= h && z >= -h && z <= h;
-}
-
-export function vec3(x, y, z) {
-  return new THREE.Vector3(x, y, z);
-}
-
-// --- collision ------------------------------------------------------------
-
-// Push a circle (centre x,z, radius r) out of every box collider.
-// Returns { hit, x, z }: hit is true when any collider moved the
-// circle, and x/z are the resolved centre — slid out along the axis of
-// smallest penetration. Callers test .hit and use .x/.z as the new
-// position; the return is a resolved position, never a plain boolean.
-export function collideCircle(game, x, z, r) {
-  let hit = false;
-  let px = x;
-  let pz = z;
-  for (const c of game.colliders) {
-    const hw = c.hw || 0;
-    const hd = c.hd || 0;
-    const dx = px - c.x;
-    const dz = pz - c.z;
-    const overX = hw + r - Math.abs(dx);
-    const overZ = hd + r - Math.abs(dz);
-    if (overX <= 0 || overZ <= 0) continue;
-    hit = true;
-    if (overX < overZ) {
-      px = c.x + (dx >= 0 ? hw + r : -(hw + r));
-    } else {
-      pz = c.z + (dz >= 0 ? hd + r : -(hd + r));
-    }
+// Reset everything a busted / wasted respawn is supposed to clear: full
+// health, no heat, and any free-roam job cancelled cleanly. Story progress
+// (mission / missionStep) is deliberately untouched — the mission module
+// decides whether the player retries the mission or drops back to free roam.
+export function resetAfterCaught(G) {
+  G.health = 100;
+  G.wanted = 0;
+  G.heat.unseenFor = 0;
+  G.heat.lastSeenAt = -999;
+  G.player.invuln = 3;
+  if (G.taxi) {
+    G.taxi.phase = 'idle';
+    G.taxi.client = null;
+    G.taxi.dest = null;
+    G.taxi.fare = 0;
+    G.taxi.timer = 0;
   }
-  // The playable square bounds the circle as well.
-  const lim = WORLD.half - r;
-  if (px < -lim) { px = -lim; hit = true; }
-  if (px > lim) { px = lim; hit = true; }
-  if (pz < -lim) { pz = -lim; hit = true; }
-  if (pz > lim) { pz = lim; hit = true; }
-  return { hit, x: px, z: pz };
+  if (G.courier) {
+    G.courier.phase = 'idle';
+    G.courier.dest = null;
+    G.courier.reward = 0;
+    G.courier.timer = 0;
+    G.courier.hasParcel = false;
+  }
+  if (G.race) {
+    G.race.phase = 'idle';
+    G.race.gate = 0;
+    G.race.timer = 0;
+    G.race.checkpoints = [];
+    G.race.countdown = 0;
+  }
 }
 
-// True when the straight segment from (x1,z1) to (x2,z2) crosses any
-// box collider (with a small clearance margin), used for police and
-// pedestrian line-of-sight checks. Slab test per axis.
-export function segmentBlocked(game, x1, z1, x2, z2) {
-  const dx = x2 - x1;
-  const dz = z2 - z1;
-  for (const c of game.colliders) {
-    const hw = (c.hw || 0) + 0.5;
-    const hd = (c.hd || 0) + 0.5;
-    let tmin = 0;
-    let tmax = 1;
-    let clear = true;
-    const axes = [
-      { d: dx, p: x1 - c.x, half: hw },
-      { d: dz, p: z1 - c.z, half: hd },
-    ];
-    for (const ax of axes) {
-      if (Math.abs(ax.d) < 1e-9) {
-        if (Math.abs(ax.p) > ax.half) { clear = false; break; }
-      } else {
-        let t0 = (-ax.half - ax.p) / ax.d;
-        let t1 = (ax.half - ax.p) / ax.d;
-        if (t0 > t1) { const tmp = t0; t0 = t1; t1 = tmp; }
-        if (t0 > tmin) tmin = t0;
-        if (t1 < tmax) tmax = t1;
-        if (tmin > tmax) { clear = false; break; }
-      }
-    }
-    if (clear && tmax >= 0 && tmin <= 1) return true;
-  }
-  return false;
+// Fresh-job record factories, so missions / jobs never hand-roll the shape.
+export function newTaxiJob() {
+  return { phase: 'idle', client: null, dest: null, fare: 0, timer: 0 };
 }
+
+export function newCourierJob() {
+  return { phase: 'idle', dest: null, reward: 0, timer: 0, hasParcel: false };
+}
+
+export function newRaceJob() {
+  return { phase: 'idle', gate: 0, timer: 0, checkpoints: [], countdown: 0 };
+}
+
+export default createGameState;

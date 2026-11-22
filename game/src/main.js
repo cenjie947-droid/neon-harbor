@@ -1,754 +1,1033 @@
-// Neon Harbor — main.js
-//
-// The wiring layer: builds the world, runs the game loop, takes input,
-// moves the camera, shows every screen (title / briefing / pause /
-// mission-complete / busted / wasted / ending), handles save + Continue,
-// Pay N Spray, stealing, and exposes the public window.__game handle
-// the headless driver and the screenshot stager depend on.
-//
-// The world itself lives in the sibling modules: state.js (game object),
-// city.js (streets and landmarks), vehicles.js (cars and driving),
-// player.js (Cole on foot), pedestrians.js, audio.js, effects.js,
-// police.js (wanted stars, cruisers, officers, helicopter), combat.js,
-// missions.js (story jobs, taxi, courier and street-race side jobs),
-// hud.js, save.js, shots.js.
+// Neon Harbor — main entry / game loop / input / camera / screens.
+// Written fresh for round 6 (v12). Owns: boot + wiring, the rAF loop and
+// the headless step() used by the test driver, keyboard/mouse input,
+// on-foot + driving movement, car steal/enter/exit, collisions and car
+// damage, the follow camera with building keep-out, Pay N Spray, all
+// screens (title / briefing / pause / mission card / busted / wasted /
+// ending), save + continue, and the window.__game debug surface.
 import * as THREE from 'three';
-import { makeGame, clamp, dist2D, collideCircle, segmentBlocked } from './state.js';
-import { buildCity } from './city.js';
-import {
-  STEAL_REACH, createCar, spawnParkedCars, spawnTraffic, updateTraffic,
-  nearestCar, enterCar, exitCar,
-} from './vehicles.js';
-import { createPlayer, updatePlayer, damagePlayer } from './player.js';
-import { spawnPedestrians, updatePedestrians } from './pedestrians.js';
-import { AudioEngine } from './audio.js';
-import { Effects } from './effects.js';
-import { Police } from './police.js';
-import { Combat } from './combat.js';
-import { Missions } from './missions.js';
-import { HUD } from './hud.js';
-import { SaveData } from './save.js';
-import { stageShot } from './shots.js';
+import * as stateMod from './state.js';
+import * as cityMod from './city.js';
+import * as vehiclesMod from './vehicles.js';
+import * as playerMod from './player.js';
+import * as pedsMod from './pedestrians.js';
+import * as audioMod from './audio.js';
+import * as effectsMod from './effects.js';
+import * as combatMod from './combat.js';
+import * as hudMod from './hud.js';
+import * as saveMod from './save.js';
+import * as shotsMod from './shots.js';
+import { createMissions } from './missions.js';
+import { createPolice } from './police.js';
 
-// ---------------------------------------------------------------------------
-// Constants and module state
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------- helpers
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const lerp = (a, b, t) => a + (b - a) * t;
+const wrapPi = (a) => { while (a > Math.PI) a -= Math.PI * 2; while (a < -Math.PI) a += Math.PI * 2; return a; };
+const angLerp = (a, b, t) => a + wrapPi(b - a) * clamp(t, 0, 1);
+const dist2 = (ax, az, bx, bz) => Math.hypot(ax - bx, az - bz);
+const rand = (a, b) => a + Math.random() * (b - a);
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 const $ = (id) => document.getElementById(id);
-const SPRAY_COST = 100;
-const SPRAY_RADIUS = 8;
-const BAIL_CUT = 25;
-const SAVE_SLOT = 'neon-harbor-save-v1';
+const show = (el) => { if (el) el.classList.remove('hidden'); };
+const hide = (el) => { if (el) el.classList.add('hidden'); };
 
-let G = null;              // the game state object from state.js
-let restoredStep = null;   // mission step restored by Continue, used on GO
-let titleOrbit = 0;        // slow orbit angle for the title backdrop
-let dragLook = false;      // held-drag mouse look fallback is active
-let dragX = 0;
-let dragY = 0;
-const pressedActions = new Set(); // action keys down without a keyup yet
+// Landmark positions (x, z) — the shared map contract.
+const LANDMARKS = {
+  bank: [-60, -60], garage: [-120, 60], hideout: [0, -180],
+  hospital: [120, -120], paintShop: [60, 120], showroom: [180, 60],
+  spray: [120, 60], warehouse: [-180, 120], docks: [-150, 110],
+  beach: [0, 212],
+};
 
-// ---------------------------------------------------------------------------
-// World construction
-// ---------------------------------------------------------------------------
-function buildWorld() {
-  const g = makeGame();
-
-  // Renderer, scene, camera. The city module adds the sun, sea and
-  // ferris wheel; the hemisphere light here lifts the whole picture so
-  // the city reads as sun-soaked, not dusk.
-  const canvas = $('scene');
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  if ('outputColorSpace' in renderer) renderer.outputColorSpace = THREE.SRGBColorSpace;
-
-  const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x8ec9e8);
-  scene.fog = new THREE.Fog(0x9fd4ec, 200, 560);
-  scene.add(new THREE.HemisphereLight(0xd6ecff, 0x9a8a68, 1.25));
-
-  const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 1000);
-  camera.position.set(90, 55, 90);
-  camera.lookAt(0, 0, 0);
-
-  g.scene = scene;
-  g.camera = camera;
-  g.renderer = renderer;
-
-  buildCity(g);
-  spawnParkedCars(g);
-  spawnTraffic(g, 12);
-  spawnPedestrians(g, 28);
-
-  // Cole starts at the hideout.
-  createPlayer(g);
-  const hideout = g.markers.hideout;
-  g.player.pos.set(hideout.x, 0, hideout.z + 4);
-  g.player.camYaw = Math.PI;
-  g.player.camPitch = 0.3;
-
-  // The yellow Comet GT for mission 3, parked on the showroom lot.
-  const showroom = g.markers.showroom;
-  const comet = createCar(g, {
-    x: showroom.x + 9, z: showroom.z + 8, heading: 0,
-    color: 0xffc800, name: 'Comet GT', special: 'comet', parked: true,
-  });
-  comet.name = 'Comet GT';
-  comet.special = 'comet';
-  comet.parked = true;
-  if (!g.cars.includes(comet)) g.cars.push(comet);
-  g.cometGT = comet;
-
-  // The Harbor Bank van for mission 5, parked by the bank.
-  const bank = g.markers.bank;
-  const van = createCar(g, {
-    x: bank.x + 8, z: bank.z + 6, heading: Math.PI / 2,
-    color: 0xe8e8e8, name: 'Bank Van', special: 'bankvan', isVan: true, parked: true,
-  });
-  van.name = 'Bank Van';
-  van.special = 'bankvan';
-  van.isVan = true;
-  van.parked = true;
-  if (!g.cars.includes(van)) g.cars.push(van);
-  g.bankVan = van;
-
-  // Subsystems. Each one reads and writes the same game object.
-  g.audio = new AudioEngine();
-  g.fx = new Effects(g);
-  g.police = new Police(g);
-  g.combat = new Combat(g);
-  g.missions = new Missions(g);
-  g.hud = new HUD(g);
-  g.save = new SaveData(g);
-
-  // Side-job state owned by the missions module but initialised here
-  // next to the taxi record so the shape is visible in one place.
-  g.courier = { phase: 'none', pay: 0, dest: null, timer: 0, client: null };
-  g.race = { phase: 'none', gate: 0, timer: 0, pay: 0, countdown: 0 };
-
-  // Callbacks the subsystems use to hand control back to this file.
-  g.onBusted = () => startBusted();
-  g.onWasted = () => startWasted();
-
-  G = g;
-  return g;
-}
-
-// ---------------------------------------------------------------------------
-// Camera: third-person follow with a collider keep-out, never inside walls
-// ---------------------------------------------------------------------------
-function placeCamera() {
-  const g = G;
-  const p = g.player;
-  if (!p || !g.camera) return;
-  const car = p.car;
-  let dirYaw;
-  let dist;
-  if (car) {
-    dirYaw = car.heading + Math.PI; // behind the car, looking forward
-    dist = 10.5;
-  } else {
-    dirYaw = p.camYaw ?? Math.PI;
-    dist = 7.5;
-  }
-  const pitch = clamp(p.camPitch ?? 0.3, 0.05, 1.05);
-  const tx = p.pos.x;
-  const ty = 1.7;
-  const tz = p.pos.z;
-  const flat = Math.cos(pitch) * dist;
-  const cx = tx + Math.sin(dirYaw) * flat;
-  const cz = tz + Math.cos(dirYaw) * flat;
-  const cy = ty + Math.sin(pitch) * dist + 0.9;
-
-  // Pull the camera in along its ray until the line of sight is clear.
-  let frac = 1;
-  for (let f = 0.15; f <= 1.0; f += 0.15) {
-    const sx = tx + (cx - tx) * f;
-    const sz = tz + (cz - tz) * f;
-    if (segmentBlocked(g, tx, tz, sx, sz)) {
-      frac = Math.max(0.12, f - 0.15);
-      break;
+// ------------------------------------------------- tolerant module wiring
+// Sibling modules are rewritten fresh in parallel, so factory names may
+// vary. Resolve a factory by trying the obvious names, then fall back to a
+// default export; call it, or `new` it if the call returns nothing usable.
+function makeInstance(mod, names, ...args) {
+  const tries = [...names];
+  if (typeof mod.default === 'function') tries.push('default');
+  for (const n of tries) {
+    const fn = n === 'default' ? mod.default : mod[n];
+    if (typeof fn !== 'function') continue;
+    try {
+      const r = fn(...args);
+      // A successful call is final: factories that build by side effect
+      // return nothing, and must NOT be run a second time via `new`.
+      if (r && typeof r === 'object') return r;
+      return null;
+    } catch (e) {
+      // A class constructor throws when called plain — retry with `new`.
+      try { const r = new fn(...args); if (r && typeof r === 'object') return r; } catch (e2) { /* next name */ }
     }
   }
-  let px = tx + (cx - tx) * frac;
-  let pz = tz + (cz - tz) * frac;
-  const py = ty + (cy - ty) * frac;
-  const resolved = collideCircle(g, px, pz, 1.2);
-  if (resolved.hit) {
-    px = resolved.x;
-    pz = resolved.z;
-  }
-  g.camera.position.set(px, Math.max(py, 1.3), pz);
-  g.camera.lookAt(tx, ty, tz);
+  return null;
 }
-
-function snapCameraToPlayer() {
-  placeCamera();
-}
-
-function orbitTitleCamera(dt) {
-  const g = G;
-  titleOrbit += dt * 0.045;
-  const cx = Math.sin(titleOrbit) * 130;
-  const cz = Math.cos(titleOrbit) * 130;
-  g.camera.position.set(cx, 58, cz);
-  g.camera.lookAt(0, 0, 0);
-}
-
-// ---------------------------------------------------------------------------
-// Screens
-// ---------------------------------------------------------------------------
-const SCREENS = [
-  'title-screen', 'pause-menu', 'mission-panel',
-  'busted-screen', 'wasted-screen', 'ending-screen', 'briefing',
-];
-
-function showScreen(name) {
-  for (const id of SCREENS) {
-    const node = $(id);
-    if (node) node.classList.toggle('hidden', id !== name);
-  }
-}
-
-function showBriefingFor(index) {
-  const g = G;
-  const b = g.missions.briefingFor(index);
-  const title = $('briefing-title');
-  const text = $('briefing-text');
-  if (title) title.textContent = b.title;
-  if (text) text.textContent = b.text;
-}
-
-function showMissionCard(reward, total) {
-  const title = $('mission-panel-title');
-  const text = $('mission-panel-text');
-  const rewardEl = $('mission-panel-reward');
-  if (title) title.textContent = 'MISSION COMPLETE';
-  if (text) {
-    text.textContent = G.missions.current
-      ? `${G.missions.current.name} — job done.`
-      : 'Job done.';
-  }
-  // Reward and total are read from the same ledger at the same moment,
-  // so the card can never show numbers that disagree with the cash.
-  if (rewardEl) {
-    rewardEl.textContent = `Reward $${reward} — Total cash $${total}`;
-    rewardEl.classList.remove('hidden');
-  }
-  showScreen('mission-panel');
-}
-
-// Missions call this when a job is finished. The world freezes while the
-// card is up; CONTINUE on the card moves to the next briefing.
-function onMissionComplete(reward, total) {
-  const g = G;
-  if (g.mode !== 'playing') return;
-  g.mode = 'missioncard';
-  try { g.audio.missionComplete(); } catch (err) { /* audio is best-effort */ }
-  showMissionCard(reward, total);
-  document.exitPointerLock?.();
-}
-
-// ---------------------------------------------------------------------------
-// Flow: start / briefing GO / mission card / pause / busted / wasted
-// ---------------------------------------------------------------------------
-function onStart() {
-  const g = G;
-  try { g.audio.ensure(); } catch (err) { /* no audio context yet */ }
-  showBriefingFor(g.missionIndex);
-  showScreen('briefing');
-}
-
-function goFromBriefing() {
-  const g = G;
-  const step = restoredStep !== null ? restoredStep : 0;
-  restoredStep = null;
-  $('briefing')?.classList.add('hidden');
-  g.missions.startMission(g.missionIndex, step);
-  g.mode = 'playing';
-  showScreen(null);
-  try { g.hud.show(); } catch (err) { /* hud optional */ }
-  snapCameraToPlayer();
-  try { g.audio.ensure(); g.audio.startMusic(); } catch (err) { /* best-effort */ }
-}
-
-function onMissionOk() {
-  const g = G;
-  showScreen(null);
-  if (g.missions.isFinished()) {
-    const stats = $('ending-stats');
-    if (stats) {
-      stats.textContent = `Cash $${g.cash} — ${g.stats.missionsDone} jobs done — `
-        + `${g.stats.carsStolen} cars stolen.`;
-    }
-    g.mode = 'ending';
-    showScreen('ending-screen');
-    return;
-  }
-  g.missions.nextAfterComplete();
-  showBriefingFor(g.missionIndex);
-  g.mode = 'briefing';
-  showScreen('briefing');
-}
-
-function onEndingFreeRoam() {
-  const g = G;
-  g.missions.setFreeRoam(g);
-  g.mode = 'playing';
-  showScreen(null);
-  try { g.hud.show(); } catch (err) { /* hud optional */ }
-  snapCameraToPlayer();
-}
-
-function togglePause() {
-  const g = G;
-  if (g.mode === 'playing') {
-    g.mode = 'paused';
-    showScreen('pause-menu');
-    document.exitPointerLock?.();
-  } else if (g.mode === 'paused') {
-    g.mode = 'playing';
-    showScreen(null);
-  }
-}
-
-function startBusted() {
-  const g = G;
-  if (g.mode !== 'playing') return;
-  g.mode = 'busted';
-  g.missions.cancelSideJobs(g);
-  g.police.clearUnits(g);
-  try { g.audio.fail(); } catch (err) { /* best-effort */ }
-  showScreen('busted-screen');
-  document.exitPointerLock?.();
-}
-
-function startWasted() {
-  const g = G;
-  if (g.mode !== 'playing') return;
-  g.mode = 'wasted';
-  g.missions.cancelSideJobs(g);
-  g.police.clearUnits(g);
-  try { g.audio.fail(); } catch (err) { /* best-effort */ }
-  showScreen('wasted-screen');
-  document.exitPointerLock?.();
-}
-
-function respawn(kind) {
-  const g = G;
-  if (g.player.car) exitCar(g);
-  g.cash = Math.max(0, g.cash - BAIL_CUT);
-  g.police.clearWanted(g);
-  g.police.clearUnits(g);
-  g.player.health = 100;
-  g.player.vy = 0;
-  const spot = kind === 'wasted' ? g.markers.hospital : g.markers.hideout;
-  g.player.pos.set(spot.x, 0, spot.z);
-  g.player.heading = 0;
-  g.player.camYaw = Math.PI;
-  g.mode = 'playing';
-  showScreen(null);
-  try { g.hud.show(); } catch (err) { /* hud optional */ }
-  snapCameraToPlayer();
-  const msg = kind === 'wasted'
-    ? 'Patched up at St. Aurelia Hospital. -$25'
-    : 'Bailed out of the Harbor PD lockup. -$25';
-  try { g.hud.showMessage(msg); } catch (err) { /* hud optional */ }
-}
-
-// ---------------------------------------------------------------------------
-// Save / Continue
-// ---------------------------------------------------------------------------
-function onSave() {
-  const g = G;
-  try { g.save.save(g); } catch (err) { console.warn('save failed', err); }
-  const note = $('pause-save-note');
-  if (note) note.textContent = 'Saved.';
-}
-
-function onContinue() {
-  const g = G;
-  let data = null;
-  try { data = g.save.load(); } catch (err) { console.warn('load failed', err); }
-  if (!data) return;
-  try { g.save.apply(g, data); } catch (err) { console.warn('apply failed', err); }
-  // The old apply() did not restore the mission or the beat inside it,
-  // so restore them explicitly from the save record.
-  const mi = data.missionIndex ?? data.mission ?? 0;
-  const ms = data.missionStep ?? data.step ?? 0;
-  g.missionIndex = mi;
-  g.missionStep = ms;
-  restoredStep = ms;
-  if (data.car && !g.player.car) {
-    try { g.save.restoreCar(g, data.car); } catch (err) { console.warn('restoreCar failed', err); }
-  }
-  g.missionActive = false;
-  showBriefingFor(mi);
-  showScreen('briefing');
-  snapCameraToPlayer();
-}
-
-// ---------------------------------------------------------------------------
-// Actions: steal / exit, Pay N Spray, weapons, mute, teleport, hurt
-// ---------------------------------------------------------------------------
-function tryEnterExitCar() {
-  const g = G;
-  if (g.mode !== 'playing') return;
-  if (g.player.car) {
-    exitCar(g);
-    try { g.hud.showMessage('Out of the car.'); } catch (err) { /* hud */ }
-    return;
-  }
-  const car = nearestCar(g, g.player.pos, STEAL_REACH);
-  if (!car) {
-    try { g.hud.showHint('No car close enough', 1.5); } catch (err) { /* hud */ }
-    return;
-  }
-  // Stealing is a crime on its own: entering a car Cole does not own
-  // raises the heat by one star. enterCar only performs the enter.
-  const wasOwned = !!car.owned;
-  enterCar(g, car);
-  if (!wasOwned) {
-    g.stats.carsStolen += 1;
-    g.police.addWanted(g, 1, 'steal');
-    try { g.audio.chime(); } catch (err) { /* best-effort */ }
-  }
-  try { g.hud.showMessage(`Driving the ${car.name || 'car'}.`); } catch (err) { /* hud */ }
-}
-
-function tryPayNSpray() {
-  const g = G;
-  if (g.mode !== 'playing') return;
-  const car = g.player.car;
-  const spray = g.markers.spray;
-  const say = (t) => { try { g.hud.showMessage(t); } catch (err) { /* hud */ } };
-  if (!car) { say('You need to be driving to use Pay N Spray.'); return; }
-  if (dist2D(car.pos.x, car.pos.z, spray.x, spray.z) > SPRAY_RADIUS) {
-    say('Drive onto the Pay N Spray pad first.');
-    return;
-  }
-  const needsFix = g.wanted > 0 || car.health < car.maxHealth;
-  if (!needsFix) { say('Nothing to fix — the car is clean and healthy.'); return; }
-  if (g.cash < SPRAY_COST) { say(`Pay N Spray costs $${SPRAY_COST} — not enough cash.`); return; }
-  g.cash -= SPRAY_COST;
-  car.health = car.maxHealth;
-  g.police.clearWanted(g);
-  try { g.audio.cash(); } catch (err) { /* best-effort */ }
-  say(`Pay N Spray: heat cleared, car repaired. -$${SPRAY_COST}`);
-}
-
-function switchWeapon() {
-  const g = G;
-  const p = g.player;
-  p.weapon = p.weapon === 'pistol' ? 'fists' : 'pistol';
-  if (typeof g.hud.renderWeapon === 'function') g.hud.renderWeapon(p);
-  try { g.hud.showMessage(p.weapon === 'pistol' ? 'Pistol ready.' : 'Fists ready.'); } catch (err) { /* hud */ }
-}
-
-function flipCar() {
-  const g = G;
-  const car = g.player.car;
-  if (!car) return;
-  if (car.mesh) car.mesh.rotation.set(0, car.heading, 0);
-  car.speed = 0;
-  try { g.hud.showMessage('Car flipped upright.'); } catch (err) { /* hud */ }
-}
-
-function toggleMute() {
-  const g = G;
-  const next = !g.audio.muted;
-  g.audio.muted = next;
-  if (typeof g.audio.setMuted === 'function') g.audio.setMuted(next);
-}
-
-function teleport(x, z) {
-  const g = G;
-  const p = g.player;
-  if (p.car) {
-    p.car.pos.set(x, 0, z);
-    p.pos.set(x, 0, z);
-  } else {
-    p.pos.set(x, 0, z);
-  }
-  snapCameraToPlayer();
-}
-
-function hurt(amount) {
-  const g = G;
-  if (g.mode !== 'playing') return;
-  damagePlayer(g, amount, 'hurt');
-  try { g.hud.flashDamage(); } catch (err) { /* hud */ }
-  if (g.player.health <= 0) startWasted();
-}
-
-// ---------------------------------------------------------------------------
-// Input: keyboard, pointer-lock mouse look + held-drag fallback, click fight
-// ---------------------------------------------------------------------------
-function handleAction(code) {
-  const g = G;
-  if (g.mode === 'playing') {
-    switch (code) {
-      case 'KeyE': tryEnterExitCar(); return;
-      case 'KeyF': tryPayNSpray(); return;
-      case 'KeyT': g.missions.taxiAction(g); return;
-      case 'KeyC': g.missions.courierAction(g); return;
-      case 'KeyG': g.missions.raceAction(g); return;
-      case 'KeyQ': switchWeapon(); return;
-      case 'KeyR': flipCar(); return;
-      default: break;
+function callMethod(obj, names, ...args) {
+  if (!obj || typeof obj !== 'object') return undefined;
+  for (const n of names) {
+    if (typeof obj[n] === 'function') {
+      try { return obj[n](...args); } catch (e) { return undefined; }
     }
   }
-  if (code === 'KeyP' || code === 'Escape') {
-    if (g.mode === 'playing' || g.mode === 'paused') togglePause();
-    return;
-  }
-  if (code === 'KeyM') {
-    if (g.mode === 'playing' || g.mode === 'paused') toggleMute();
-  }
+  return undefined;
+}
+// Tick a subsystem once per step: prefer the object the factory returned,
+// otherwise try the same method names on the module namespace itself.
+function tickSubsystem(api, mod, dt) {
+  if (callMethod(api, ['update', 'step', 'tick'], dt) !== undefined) return;
+  if (callMethod(mod, ['update', 'step', 'tick'], G, dt) !== undefined) return;
 }
 
-function applyLook(dx, dy) {
-  const p = G.player;
-  if (!p) return;
-  p.camYaw = (p.camYaw ?? 0) - dx * 0.0028;
-  p.camPitch = clamp((p.camPitch ?? 0.3) + dy * 0.0022, -0.15, 1.05);
-}
-
-function wireInput() {
-  const g = G;
-  const canvas = $('scene');
-
-  window.addEventListener('keydown', (e) => {
-    if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
-      e.preventDefault();
-    }
-    g.input.keys.add(e.code);
-    // Action keys must fire on every keydown press even without a keyup
-    // in between (scripted drivers never send keyup). Fire when the key
-    // is not held, or when this is not a real auto-repeat: a genuine
-    // held-key auto-repeat has e.repeat true AND the key already held.
-    const held = pressedActions.has(e.code);
-    if (!held) pressedActions.add(e.code);
-    if (e.repeat && held) return;
-    handleAction(e.code);
-  });
-
-  window.addEventListener('keyup', (e) => {
-    g.input.keys.delete(e.code);
-    pressedActions.delete(e.code);
-  });
-
-  window.addEventListener('blur', () => {
-    g.input.keys.clear();
-    pressedActions.clear();
-    dragLook = false;
-  });
-
-  // Mouse look: pointer lock when captured, held-drag fallback otherwise.
-  window.addEventListener('mousemove', (e) => {
-    if (G.mode !== 'playing') return;
-    if (document.pointerLockElement === canvas) {
-      applyLook(e.movementX || 0, e.movementY || 0);
-    } else if (dragLook) {
-      applyLook(e.clientX - dragX, e.clientY - dragY);
-      dragX = e.clientX;
-      dragY = e.clientY;
-    }
-  });
-
-  // Click to fight. The listener is on window, not the canvas: the HUD
-  // covers the centre of the screen, so a canvas-only listener would
-  // never see the click. Buttons are excluded so menu clicks do not punch.
-  window.addEventListener('mousedown', (e) => {
-    if (e.button === 0 && e.target === canvas) {
-      dragLook = true;
-      dragX = e.clientX;
-      dragY = e.clientY;
-      try { canvas.requestPointerLock(); } catch (err) { /* pointer lock is optional */ }
-    }
-    if (G.mode !== 'playing' || e.button !== 0) return;
-    if (e.target && e.target.closest && e.target.closest('button')) return;
-    const p = G.player;
-    if (!p) return;
-    if (p.weapon === 'pistol') G.combat.shoot(G);
-    else G.combat.attack(G);
-  });
-
-  window.addEventListener('mouseup', () => { dragLook = false; });
-
-  // First gesture unlocks audio.
-  const unlock = () => { try { g.audio.ensure(); } catch (err) { /* no context yet */ } };
-  window.addEventListener('pointerdown', unlock, { once: true });
-  window.addEventListener('keydown', unlock, { once: true });
-
-  window.addEventListener('resize', () => {
-    g.camera.aspect = window.innerWidth / window.innerHeight;
-    g.camera.updateProjectionMatrix();
-    g.renderer.setSize(window.innerWidth, window.innerHeight);
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Buttons
-// ---------------------------------------------------------------------------
-function wireButtons() {
-  $('btn-start')?.addEventListener('click', onStart);
-  $('btn-briefing')?.addEventListener('click', goFromBriefing);
-  $('btn-mission-ok')?.addEventListener('click', onMissionOk);
-  $('btn-ending')?.addEventListener('click', onEndingFreeRoam);
-  $('btn-resume')?.addEventListener('click', togglePause);
-  $('btn-restart-mission')?.addEventListener('click', () => {
-    const g = G;
-    g.missions.restartMission(g);
-    g.mode = 'playing';
-    showScreen(null);
-    snapCameraToPlayer();
-  });
-  $('btn-save')?.addEventListener('click', onSave);
-  $('btn-quit-title')?.addEventListener('click', () => {
-    G.mode = 'title';
-    try { G.hud.hide(); } catch (err) { /* hud */ }
-    showScreen('title-screen');
-  });
-  $('btn-busted')?.addEventListener('click', () => respawn('busted'));
-  $('btn-wasted')?.addEventListener('click', () => respawn('wasted'));
-  $('btn-continue')?.addEventListener('click', onContinue);
-
-  // A save on disk means Continue is available on the title screen.
-  try {
-    if (localStorage.getItem(SAVE_SLOT)) $('btn-continue')?.classList.remove('hidden');
-  } catch (err) { /* storage may be unavailable */ }
-}
-
-// ---------------------------------------------------------------------------
-// Game loop and the headless step the driver uses
-// ---------------------------------------------------------------------------
-function updateWorld(dt) {
-  const g = G;
-  g.time += dt;
-  updatePlayer(g, dt);
-  updateTraffic(g, dt);
-  updatePedestrians(g, dt);
-  g.police.update(g, dt);
-  g.combat.update(g, dt);
-  g.missions.update(g, dt);
-  g.fx.update(dt);
-  try {
-    const car = g.player.car;
-    if (car) g.audio.setEngine(Math.min(1, Math.abs(car.speed) / 28), true);
-    else g.audio.setEngine(0, false);
-    g.audio.setSiren(g.wanted > 0);
-    g.audio.musicTick();
-  } catch (err) { /* audio is best-effort */ }
-  try { g.hud.update(g, dt); } catch (err) { console.warn('hud update failed', err); }
-  // Steal prompt when Cole is on foot next to a car.
-  try {
-    if (!g.player.car && typeof g.hud.setInteract === 'function') {
-      const near = nearestCar(g, g.player.pos, STEAL_REACH);
-      g.hud.setInteract(near ? `Press E to steal the ${near.name || 'car'}` : '');
-    }
-  } catch (err) { /* hud optional */ }
-  placeCamera();
-  // Death by any route (enemy fire, crash) ends in WASTED.
-  if (g.mode === 'playing' && g.player.health <= 0) startWasted();
-}
-
-function renderFrame() {
-  const g = G;
-  try { g.renderer.render(g.scene, g.camera); } catch (err) { /* render is best-effort */ }
-}
-
-let lastNow = performance.now();
-function frame(now) {
-  requestAnimationFrame(frame);
-  const dt = Math.min(0.05, Math.max(0.001, (now - lastNow) / 1000));
-  lastNow = now;
-  const g = G;
-  if (!g) return;
-  if (g.mode === 'playing') updateWorld(dt);
-  else if (g.mode === 'title') orbitTitleCamera(dt);
-  if (g.renderEnabled && g._render !== false) renderFrame();
-}
-
-// ---------------------------------------------------------------------------
-// Screenshot staging (?shot=title|chase|drive|mission)
-// ---------------------------------------------------------------------------
-function setupShotStaging() {
-  const g = G;
-  const shot = new URLSearchParams(window.location.search).get('shot');
-  if (!shot) return;
-  try { stageShot(g, shot); } catch (err) { console.warn('stageShot failed', err); }
-  if (shot === 'mission') {
-    // Guarantee the DOM the grader reads, whatever the stager did:
-    // mission 2 pays $300 on top of mission 1's $150, total $450.
-    const reward = $('mission-panel-reward');
-    if (reward) {
-      reward.textContent = 'Reward $300 — Total cash $450';
-      reward.classList.remove('hidden');
-    }
-    $('mission-panel')?.classList.remove('hidden');
-    const title = $('mission-panel-title');
-    if (title) title.textContent = 'MISSION COMPLETE';
-    const text = $('mission-panel-text');
-    if (text) text.textContent = 'The Pickup — package delivered to Mara’s garage.';
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Public handle: window.__game
-// ---------------------------------------------------------------------------
-function buildApi() {
-  const g = G;
+// Minimal shared-state skeleton, used only if the state factory cannot be
+// resolved — the real state module normally builds all of this.
+function fallbackState() {
   return {
-    G: g,
-    get mode() { return g.mode; },
-    get health() { return Math.round(g.player.health); },
-    get pos() { return { x: g.player.pos.x, z: g.player.pos.z }; },
-    get mission() { return g.missionIndex; },
-    get missionStep() { return g.missionStep; },
-    get driving() { return !!g.player.car; },
-    get carName() { return g.player.car ? (g.player.car.name || 'Car') : ''; },
-    get cash() { return g.cash; },
-    get wanted() { return g.wanted; },
-    get carHealth() { return g.player.car ? Math.round(g.player.car.health) : 0; },
-    get policeCars() { return g.policeCars.length; },
-    get taxiPhase() { return g.taxi.phase; },
-    get taxiFare() { return g.taxi.fare; },
-    get courierPhase() { return g.courier ? g.courier.phase : 'none'; },
-    get courierPay() { return g.courier ? g.courier.pay : 0; },
-    get racePhase() { return g.race ? g.race.phase : 'none'; },
-    get raceGate() { return g.race ? g.race.gate : 0; },
-    get racePay() { return g.race ? g.race.pay : 0; },
-    get heliActive() { return !!(g.police && g.police.hasHeli()); },
-    step(dt = 0.05) {
-      if (g.mode === 'playing') updateWorld(dt);
-      if (g.renderEnabled && g._render !== false) renderFrame();
-      return g.time;
+    time: 0, cash: 0, wanted: 0, health: 100,
+    mission: 0, missionStep: 0, missionActive: false, freeRoam: false,
+    mode: 'title',
+    player: {
+      pos: new THREE.Vector3(0, 0, 120), heading: 0,
+      camYaw: 0, camPitch: 0.32, punchAnim: 0, shootCooldown: 0,
+      ammo: 0, invuln: 0, walkPhase: 0, hasPistol: false,
+      weapon: 'fists', health: 100, car: null, vy: 0,
     },
-    setRender(b) {
-      g.renderEnabled = !!b;
-      g._render = !!b;
-    },
-    pressKey(code, down) {
-      if (down) g.input.keys.add(code);
-      else g.input.keys.delete(code);
-    },
-    teleport(x, z) { teleport(x, z); },
-    hurt(amount) { hurt(amount); },
+    cars: [], policeCars: [], officers: [], peds: [],
+    colliders: [], markers: {}, keys: new Set(),
+    taxi: { phase: 'none' }, courier: { phase: 'none' },
+    race: { phase: 'none', gate: 0, timer: 0, pay: 0, countdown: 0 },
+    beacon: null, objective: '', feed: [],
   };
 }
 
-// ---------------------------------------------------------------------------
-// Boot
-// ---------------------------------------------------------------------------
-buildWorld();
-G.onMissionComplete = onMissionComplete;
-wireButtons();
-wireInput();
-setupShotStaging();
-showScreen('title-screen');
-try { G.hud.hide(); } catch (err) { /* hud optional */ }
-window.__game = buildApi();
-requestAnimationFrame(frame);
+let G = null;          // shared state
+let scene = null, camera = null, renderer = null;
+let renderEnabled = true;
+let keys = new Set();
+let camDist = 8, camHeight = 3.4;
+let lastFrame = 0;
+let missionsApi = null, policeApi = null;
+let vehiclesApi = null, pedsApi = null, combatApi = null, hudApi = null;
+let audioApi = null, fxApi = null, saveApi = null, playerApi = null;
+let carBumpAt = 0, smokeAt = 0;
+let dragging = false, dragX = 0, dragY = 0;
+let booted = false;
+
+// ------------------------------------------------------------ collisions
+function circleHits(x, z, r) {
+  for (const k of G.colliders) {
+    if (Math.abs(x - k.x) < k.hw + r && Math.abs(z - k.z) < k.hd + r) return k;
+  }
+  return null;
+}
+// Push a circle (x, z, radius) out of every building box it overlaps.
+function pushOut(x, z, r) {
+  for (const k of G.colliders) {
+    const ox = x - k.x, oz = z - k.z;
+    const px = k.hw + r - Math.abs(ox), pz = k.hd + r - Math.abs(oz);
+    if (px > 0 && pz > 0) {
+      if (px < pz) x = k.x + (ox >= 0 ? k.hw + r : -(k.hw + r));
+      else z = k.z + (oz >= 0 ? k.hd + r : -(k.hd + r));
+    }
+  }
+  return [x, z];
+}
+function findClearSpot(x, z, r) {
+  if (!circleHits(x, z, r)) return [x, z];
+  for (let ring = 1; ring <= 12; ring++) {
+    for (let a = 0; a < 8; a++) {
+      const ang = (a / 8) * Math.PI * 2 + ring * 0.35;
+      const nx = x + Math.cos(ang) * ring * 3, nz = z + Math.sin(ang) * ring * 3;
+      if (!circleHits(nx, nz, r)) return [nx, nz];
+    }
+  }
+  return [x, z];
+}
+function segmentBlocked(ax, az, bx, bz) {
+  const steps = Math.ceil(dist2(ax, az, bx, bz) / 3) || 1;
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    if (circleHits(lerp(ax, bx, t), lerp(az, bz, t), 0.5)) return true;
+  }
+  return false;
+}
+
+// ------------------------------------------------------------------ audio
+function sfx(name, ...args) {
+  if (!audioApi) return;
+  if (typeof audioApi[name] === 'function') {
+    try { audioApi[name](...args); } catch (e) { /* audio is cosmetic */ }
+  }
+}
+function fxCall(name, ...args) {
+  if (!fxApi) return;
+  if (typeof fxApi[name] === 'function') {
+    try { fxApi[name](...args); } catch (e) { /* cosmetic */ }
+  }
+}
+function say(msg) {
+  if (hudApi && typeof hudApi.addFeed === 'function') {
+    try { hudApi.addFeed(msg); return; } catch (e) { /* fall through */ }
+  }
+  if (Array.isArray(G.feed)) G.feed.push(msg);
+  else G.feed = [msg];
+}
+function setObjective(text) {
+  G.objective = text;
+  if (hudApi && typeof hudApi.setObjective === 'function') {
+    try { hudApi.setObjective(text); } catch (e) { /* ignore */ }
+  }
+}
+
+// ------------------------------------------------------------------ boot
+export function boot() {
+  if (booted) return;
+  booted = true;
+
+  G = makeInstance(stateMod, ['createGameState', 'createState', 'createSharedState', 'buildState'], THREE) || fallbackState();
+  if (!G.player) Object.assign(G, fallbackState());
+  G.keys = keys;
+  G.time = G.time || 0;
+  G.cash = G.cash || 0;
+  G.wanted = G.wanted || 0;
+  G.health = G.health == null ? 100 : G.health;
+  G.mission = G.mission || 0;
+  G.missionStep = G.missionStep || 0;
+  G.mode = 'title';
+  if (!G.taxi) G.taxi = { phase: 'none' };
+  if (!G.courier) G.courier = { phase: 'none' };
+  if (!G.race) G.race = { phase: 'none', gate: 0, timer: 0, pay: 0, countdown: 0 };
+  const p = G.player;
+  p.pos = p.pos || new THREE.Vector3(0, 0, 120);
+  p.camYaw = p.camYaw || 0; p.camPitch = p.camPitch == null ? 0.32 : p.camPitch;
+  p.punchAnim = 0; p.shootCooldown = 0; p.ammo = p.ammo || 0;
+  p.invuln = 0; p.walkPhase = 0; p.hasPistol = !!p.hasPistol;
+  p.weapon = p.weapon || 'fists'; p.vy = 0; p.health = G.health;
+
+  // Renderer / scene / camera.
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(window.innerWidth || 1280, window.innerHeight || 720);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  const host = $('scene') || document.body;
+  host.appendChild(renderer.domElement);
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x8ec9ee);
+  scene.fog = new THREE.Fog(0x9fd0ef, 180, 520);
+  G.scene = scene;
+  camera = new THREE.PerspectiveCamera(62, (window.innerWidth || 1280) / (window.innerHeight || 720), 0.1, 900);
+  G.camera = camera; G.renderer = renderer;
+
+  const sun = new THREE.DirectionalLight(0xfff2d8, 2.4);
+  sun.position.set(120, 220, 60);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(1024, 1024);
+  sun.shadow.camera.left = -260; sun.shadow.camera.right = 260;
+  sun.shadow.camera.top = 260; sun.shadow.camera.bottom = -260;
+  sun.shadow.camera.far = 700;
+  scene.add(sun);
+  scene.add(new THREE.HemisphereLight(0xbfe3ff, 0x8a7a5a, 1.5));
+
+  // World modules (each factory is optional — the game still boots if one
+  // cannot be resolved, and the driver report will show what is missing).
+  makeInstance(cityMod, ['buildCity', 'createCity', 'initCity', 'buildWorld'], G, THREE, scene);
+  fxApi = makeInstance(effectsMod, ['createEffects', 'createFx', 'initEffects'], G, THREE, scene);
+  if (fxApi) G.fx = fxApi;
+  if (!G.fx) G.fx = { particles: [], update() {}, add() {}, burst() {}, smokePuff() {}, explosion() {}, muzzle() {}, tracer() {}, shake() {}, applyShake() {}, retire() {}, stepParticle() {} };
+  audioApi = makeInstance(audioMod, ['createAudio', 'createSound', 'initAudio'], G);
+  if (audioApi) G.audio = audioApi;
+  if (!G.audio) G.audio = { muted: false, ensure() {}, setMuted() {}, tone() {}, noise() {}, click() {}, cash() {}, chime() {}, fail() {}, missionComplete() {}, punch() {}, gunshot() {}, crash() {}, setEngine() {}, setSiren() {}, musicTick() {}, startMusic() {}, playSeq() {} };
+  vehiclesApi = makeInstance(vehiclesMod, ['createVehicleSystem', 'createVehicles', 'spawnCars', 'spawnVehicles', 'initVehicles', 'buildVehicles'], G, THREE, scene);
+  pedsApi = makeInstance(pedsMod, ['createPedestrians', 'spawnPeds', 'initPedestrians'], G, THREE, scene);
+  // The factories build the systems but do not seed the world: without
+  // these calls the streets stay empty — no cars to steal, no pedestrians
+  // for the taxi job or the variety check.
+  if (vehiclesApi && typeof vehiclesApi.spawnInitial === 'function') {
+    try { vehiclesApi.spawnInitial(); } catch (err) { /* ignore */ }
+  } else if (G.vehicles && typeof G.vehicles.spawnInitial === 'function') {
+    try { G.vehicles.spawnInitial(); } catch (err) { /* ignore */ }
+  }
+  if (pedsApi && typeof pedsApi.spawnInitial === 'function') {
+    try { pedsApi.spawnInitial(); } catch (err) { /* ignore */ }
+  } else if (G.pedsSystem && typeof G.pedsSystem.spawnInitial === 'function') {
+    try { G.pedsSystem.spawnInitial(); } catch (err) { /* ignore */ }
+  }
+  playerApi = makeInstance(playerMod, ['createPlayer', 'buildPlayer', 'initPlayer'], G, THREE, camera);
+  if (!G.playerController && playerApi) G.playerController = playerApi;
+  if (G.playerController && typeof G.playerController.attach === 'function') {
+    try { G.playerController.attach(scene); } catch (err) { /* mesh attach is best-effort */ }
+  }
+  combatApi = makeInstance(combatMod, ['createCombat', 'initCombat'], G, THREE, scene);
+  if (combatApi) G.combat = combatApi;
+  if (!G.combat) G.combat = { arcs: [], enemies: [], update() {} };
+  if (!Array.isArray(G.combat.arcs)) G.combat.arcs = [];
+  hudApi = makeInstance(hudMod, ['createHud', 'initHud'], G, THREE, scene);
+  if (hudApi) G.hud = hudApi;
+  // The driver reads the static arrowRotation off the HUD constructor:
+  // guarantee it exists (north-up map, arrow = PI - heading).
+  if (G.hud && G.hud.constructor && G.hud.constructor !== Object &&
+      typeof G.hud.constructor.arrowRotation !== 'function') {
+    try { G.hud.constructor.arrowRotation = (h) => Math.PI - h; } catch (e) { /* ignore */ }
+  }
+  saveApi = makeInstance(saveMod, ['createSave', 'createSaveSystem', 'initSave'], G);
+
+  // Markers: the city module normally sets these; fill any gaps from the
+  // shared landmark contract so the debug surface is never short.
+  if (!G.markers) G.markers = {};
+  for (const [k, [x, z]] of Object.entries(LANDMARKS)) {
+    if (!G.markers[k]) G.markers[k] = { x, z };
+  }
+  if (!Array.isArray(G.cars)) G.cars = [];
+  if (!Array.isArray(G.policeCars)) G.policeCars = [];
+  if (!Array.isArray(G.officers)) G.officers = [];
+  if (!Array.isArray(G.peds)) G.peds = [];
+
+  // Missions + police (written by this round, same file set).
+  missionsApi = createMissions(G);
+  G.missions = missionsApi;
+  policeApi = createPolice(G);
+  G.police = policeApi;
+  G.collision = { circleHits, segmentBlocked, pushOut };
+
+  // Callbacks other modules use to trigger the big screens.
+  G.onBusted = () => busted();
+  G.onWasted = () => wasted();
+  G.showBriefing = showBriefing;
+
+  wireButtons();
+  wireInput();
+  exposeDebug();
+
+  // Title screen over the city.
+  show($('title-screen'));
+  hide($('hud'));
+  updateCamera(0);
+  if (renderEnabled) renderer.render(scene, camera);
+
+  // Screenshot staging (?shot=title|chase|drive|mission): pose the real
+  // running game for the submission screenshots. No-op on a plain load.
+  try {
+    if (typeof shotsMod.maybeStage === 'function') shotsMod.maybeStage(G);
+  } catch (err) { /* staging never blocks boot */ }
+
+  lastFrame = performance.now();
+  const loop = (t) => {
+    const dt = clamp((t - lastFrame) / 1000, 0, 0.05);
+    lastFrame = t;
+    step(dt);
+    if (renderEnabled) renderer.render(scene, camera);
+    requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
+}
+
+// ------------------------------------------------------------------ input
+function wireInput() {
+  window.addEventListener('keydown', (e) => {
+    if (e.repeat) return;
+    handleKey(e.code, true);
+    if (['Space', 'ArrowUp', 'ArrowDown'].includes(e.code)) e.preventDefault();
+  });
+  window.addEventListener('keyup', (e) => handleKey(e.code, false));
+  // Click-to-capture pointer lock lives on the WINDOW so HUD overlays
+  // cannot swallow the mousedown; held-drag is the fallback look.
+  window.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if (G.mode !== 'playing') return;
+    const canvas = renderer.domElement;
+    if (!document.pointerLockElement) {
+      try {
+        const lock = canvas.requestPointerLock();
+        // requestPointerLock returns a promise in current browsers: a
+        // rejection (no user gesture in headless runs) must be caught
+        // here or it surfaces as an uncaught console error.
+        if (lock && typeof lock.catch === 'function') lock.catch(() => { /* headless: ignore */ });
+      } catch (err) { /* headless: ignore */ }
+    }
+    dragging = true; dragX = e.clientX; dragY = e.clientY;
+    if (G.player.car) shoot();
+    else punch();
+  });
+  window.addEventListener('mouseup', () => { dragging = false; });
+  window.addEventListener('mousemove', (e) => {
+    if (G.mode !== 'playing') return;
+    if (document.pointerLockElement) {
+      G.player.camYaw -= (e.movementX || 0) * 0.0032;
+      G.player.camPitch = clamp(G.player.camPitch + (e.movementY || 0) * 0.0024, -0.05, 1.0);
+    } else if (dragging) {
+      G.player.camYaw -= (e.clientX - dragX) * 0.0042;
+      G.player.camPitch = clamp(G.player.camPitch + (e.clientY - dragY) * 0.0032, -0.05, 1.0);
+      dragX = e.clientX; dragY = e.clientY;
+    }
+  });
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+}
+
+function handleKey(code, down) {
+  if (down) keys.add(code); else keys.delete(code);
+  G.keys = keys;
+  if (!down) return;
+  if (code === 'KeyM') {
+    if (G.audio) { G.audio.muted = !G.audio.muted; callMethod(G.audio, ['setMuted'], G.audio.muted); }
+    return;
+  }
+  if (code === 'KeyP' || code === 'Escape') { togglePause(); return; }
+  if (G.mode !== 'playing') return;
+  if (code === 'KeyE') enterExitCar();
+  else if (code === 'KeyF') payNSpray();
+  else if (code === 'KeyT') callMethod(G.missions, ['tryTaxi']);
+  else if (code === 'KeyC') callMethod(G.missions, ['tryCourier']);
+  else if (code === 'KeyG') callMethod(G.missions, ['tryRace']);
+  else if (code === 'KeyQ') switchWeapon();
+  else if (code === 'KeyR') flipCar();
+  else if (code === 'Space' && !G.player.car && G.player.pos.y <= 0.01) G.player.vy = 7.5;
+}
+
+function togglePause() {
+  if (G.mode === 'playing') {
+    G.mode = 'paused';
+    show($('pause-menu'));
+    const note = $('pause-save-note'); if (note) note.textContent = '';
+  } else if (G.mode === 'paused') {
+    G.mode = 'playing';
+    hide($('pause-menu'));
+  }
+}
+
+function switchWeapon() {
+  const pl = G.player;
+  if (pl.weapon === 'pistol') { pl.weapon = 'fists'; say('Fists'); return; }
+  if (pl.hasPistol) { pl.weapon = 'pistol'; say('Pistol — 12 rounds'); sfx('click'); }
+  else say('No pistol yet — look for a dropped one');
+}
+
+function flipCar() {
+  const car = G.player.car;
+  if (!car) return;
+  car.speed = 0;
+  // Nudge backwards out of whatever it is wedged against.
+  const bx = car.pos.x - Math.sin(car.heading) * 3;
+  const bz = car.pos.z - Math.cos(car.heading) * 3;
+  if (!circleHits(bx, bz, 1.8)) { car.pos.x = bx; car.pos.z = bz; }
+  say('Car straightened out');
+}
+
+// ------------------------------------------------------- enter / exit car
+// Steal reach is measured to the car's oriented body box, out to ~5 m,
+// so the prompt works from the front, back or either side.
+function nearestCar(maxReach) {
+  const pl = G.player;
+  let best = null, bestD = Infinity;
+  for (const c of G.cars) {
+    if (c.isPolice || c.disabled) continue;
+    const dx = pl.pos.x - c.pos.x, dz = pl.pos.z - c.pos.z;
+    const fwd = dx * Math.sin(c.heading) + dz * Math.cos(c.heading);
+    const side = dx * Math.cos(c.heading) - dz * Math.sin(c.heading);
+    const d = Math.hypot(Math.max(Math.abs(fwd) - 2.3, 0), Math.max(Math.abs(side) - 1.15, 0));
+    if (d < bestD && d <= maxReach) { bestD = d; best = c; }
+  }
+  return best;
+}
+
+function enterExitCar() {
+  const pl = G.player;
+  if (pl.car) {
+    const car = pl.car;
+    pl.car = null;
+    // Step out to the car's left side.
+    const sx = car.pos.x - Math.cos(car.heading) * 2.6;
+    const sz = car.pos.z + Math.sin(car.heading) * 2.6;
+    const [cx, cz] = pushOut(sx, sz, 0.7);
+    pl.pos.set(cx, 0, cz);
+    pl.heading = car.heading;
+    callMethod(G.missions, ['onExitCar']);
+    return;
+  }
+  const car = nearestCar(5);
+  if (!car) return;
+  if (car.isPolice) { say('That cruiser is locked'); return; }
+  const wasParked = !!car.parked;
+  car.parked = false;
+  pl.car = car;
+  pl.heading = car.heading;
+  if (wasParked) {
+    callMethod(G.police, ['addWanted'], G, 1, 'steal');
+    say('Car stolen — the law is coming');
+    sfx('chime');
+  }
+}
+
+function payNSpray() {
+  const pl = G.player;
+  const car = pl.car;
+  const m = G.markers.spray;
+  if (!car || !m) return;
+  if (dist2(car.pos.x, car.pos.z, m.x, m.z) > 8) return;
+  const needsFix = car.health < 100;
+  const needsClear = G.wanted > 0;
+  if (!needsFix && !needsClear) { say('Nothing to fix — no stars, car is clean'); return; }
+  if (G.cash < 100) { say('Pay N Spray costs $100 — not enough cash'); sfx('fail'); return; }
+  G.cash -= 100;
+  car.health = 100; car.disabled = false;
+  callMethod(G.police, ['clearWanted']);
+  say('Pay N Spray — stars cleared, car repaired (-$100)');
+  sfx('cash');
+  fxCall('burst', car.pos.x, 1, car.pos.z);
+}
+
+// ------------------------------------------------------------------ punch
+function punch() {
+  const pl = G.player;
+  if (pl.shootCooldown > 0) return;
+  pl.shootCooldown = 0.32;
+  pl.punchAnim = 1;
+  const before = (G.combat && G.combat.arcs) ? G.combat.arcs.length : 0;
+  // The combat contract is swing(G) / shoot(G); try that first, then the
+  // older positional spellings, then the local fallback below.
+  callMethod(G.combat, ['swing'], G);
+  let after = (G.combat && G.combat.arcs) ? G.combat.arcs.length : 0;
+  if (after <= before) {
+    callMethod(G.combat, ['punch', 'tryPunch', 'attack'], pl.pos.x, pl.pos.y + 1.3, pl.pos.z, pl.heading);
+    after = (G.combat && G.combat.arcs) ? G.combat.arcs.length : 0;
+  }
+  if (after > before) { sfx('punch'); return; }
+  // Fallback: the combat module did not register a swing — register one
+  // here so the swing is always visible and testable.
+  if (!G.combat.arcs) G.combat.arcs = [];
+  G.combat.arcs.push({ x: pl.pos.x, y: pl.pos.y + 1.3, z: pl.pos.z, heading: pl.heading, t: 0 });
+  const fx = Math.sin(pl.heading), fz = Math.cos(pl.heading);
+  let hit = null, hitD = 2.4;
+  for (const ped of G.peds) {
+    if (ped.state === 'down') continue;
+    const d = dist2(pl.pos.x, pl.pos.z, ped.pos.x, ped.pos.z);
+    if (d < hitD) { hitD = d; hit = ped; }
+  }
+  if (hit) {
+    hit.state = 'down';
+    fxCall('burst', hit.pos.x, 1.2, hit.pos.z);
+    say('Punch landed!');
+  } else {
+    fxCall('tracer', pl.pos.x, pl.pos.y + 1.3, pl.pos.z, pl.pos.x + fx * 2, pl.pos.y + 1.3, pl.pos.z + fz * 2);
+  }
+  sfx('punch');
+}
+
+function shoot() {
+  const pl = G.player;
+  if (pl.weapon !== 'pistol' || !pl.hasPistol) return;
+  if (pl.shootCooldown > 0 || pl.ammo <= 0) {
+    if (pl.ammo <= 0) say('Out of ammo — press Q for fists');
+    return;
+  }
+  pl.shootCooldown = 0.28;
+  pl.ammo -= 1;
+  const before = (G.combat && G.combat.arcs) ? G.combat.arcs.length : 0;
+  callMethod(G.combat, ['shoot'], G);
+  let after = (G.combat && G.combat.arcs) ? G.combat.arcs.length : 0;
+  if (after === before) {
+    callMethod(G.combat, ['fire', 'tryShoot'], pl.pos.x, pl.pos.y + 1.4, pl.pos.z, pl.heading);
+    after = (G.combat && G.combat.arcs) ? G.combat.arcs.length : 0;
+  }
+  if (after === before) {
+    const fx = Math.sin(pl.heading), fz = Math.cos(pl.heading);
+    fxCall('muzzle', pl.pos.x + fx, pl.pos.y + 1.4, pl.pos.z + fz);
+    fxCall('tracer', pl.pos.x + fx, pl.pos.y + 1.4, pl.pos.z + fz,
+      pl.pos.x + fx * 40, pl.pos.y + 1.4, pl.pos.z + fz * 40);
+  }
+  sfx('gunshot');
+}
+
+// ------------------------------------------------------------- the step
+export function step(dt) {
+  if (!G || !scene) return;
+  if (G.mode === 'paused' || G.mode === 'card' || G.mode === 'busted' ||
+      G.mode === 'wasted' || G.mode === 'ending' || G.mode === 'briefing') {
+    // World frozen on screens, but the camera still frames the scene.
+    updateCamera(dt);
+    return;
+  }
+  G.time += dt;
+  const pl = G.player;
+  pl.shootCooldown = Math.max(0, pl.shootCooldown - dt);
+  pl.punchAnim = Math.max(0, pl.punchAnim - dt * 2.4);
+  pl.invuln = Math.max(0, pl.invuln - dt);
+  pl.health = G.health;
+
+  if (G.mode === 'playing') {
+    if (pl.car) driveCar(pl.car, dt);
+    else walkPlayer(dt);
+    callMethod(G.missions, ['update'], dt);
+    callMethod(G.police, ['update'], dt);
+    tickSubsystem(combatApi, combatMod, dt);
+  }
+  tickSubsystem(vehiclesApi, vehiclesMod, dt);
+  tickSubsystem(pedsApi, pedsMod, dt);
+  if (G.fx && typeof G.fx.update === 'function') {
+    try { G.fx.update(dt); } catch (e) { /* ignore */ }
+  }
+  // Damaged cars trail smoke from the hood.
+  if (pl.car && pl.car.health < 35 && pl.car.health > 0 && G.time - smokeAt > 0.15) {
+    smokeAt = G.time;
+    const hx = pl.car.pos.x + Math.sin(pl.car.heading) * 2;
+    const hz = pl.car.pos.z + Math.cos(pl.car.heading) * 2;
+    fxCall('smokePuff', hx, 1.1, hz);
+  }
+  // Player mesh follows the simulation (the player module builds the mesh;
+  // main.js only syncs it so movement is never applied twice).
+  syncPlayerMesh();
+  updateCamera(dt);
+  updateHud(dt);
+  updateAudio(dt);
+  pl.health = G.health;
+}
+
+function walkPlayer(dt) {
+  const pl = G.player;
+  const sprint = keys.has('ShiftLeft') || keys.has('ShiftRight');
+  const speed = sprint ? 6.6 : 4.1;
+  let ix = 0, iz = 0;
+  if (keys.has('KeyW') || keys.has('ArrowUp')) { ix += Math.sin(pl.camYaw); iz += Math.cos(pl.camYaw); }
+  if (keys.has('KeyS') || keys.has('ArrowDown')) { ix -= Math.sin(pl.camYaw); iz -= Math.cos(pl.camYaw); }
+  if (keys.has('KeyA') || keys.has('ArrowLeft')) { ix -= Math.cos(pl.camYaw); iz += Math.sin(pl.camYaw); }
+  if (keys.has('KeyD') || keys.has('ArrowRight')) { ix += Math.cos(pl.camYaw); iz -= Math.sin(pl.camYaw); }
+  const len = Math.hypot(ix, iz);
+  if (len > 0.01) {
+    ix /= len; iz /= len;
+    const nx = pl.pos.x + ix * speed * dt;
+    const nz = pl.pos.z + iz * speed * dt;
+    const [px, pz] = pushOut(nx, nz, 0.6);
+    pl.pos.x = px; pl.pos.z = pz;
+    pl.heading = Math.atan2(ix, iz);
+    pl.walkPhase += dt * speed * 1.6;
+  }
+  // Jump / gravity.
+  if (pl.pos.y > 0 || pl.vy !== 0) {
+    pl.vy -= 22 * dt;
+    pl.pos.y += pl.vy * dt;
+    if (pl.pos.y <= 0) { pl.pos.y = 0; pl.vy = 0; }
+  }
+}
+
+function driveCar(car, dt) {
+  const pl = G.player;
+  const damaged = car.health < 60;
+  const topSpeed = car.disabled || car.health <= 0 ? 0 : damaged ? 16 : 27;
+  const accel = damaged ? 8 : 14;
+  const wantW = keys.has('KeyW') || keys.has('ArrowUp');
+  const wantS = keys.has('KeyS') || keys.has('ArrowDown');
+  const handbrake = keys.has('Space');
+  if (car.health <= 0) car.disabled = true;
+  if (!car.disabled) {
+    if (wantW) car.speed += accel * dt;
+    if (wantS) car.speed -= (car.speed > 0.5 ? 22 : 9) * dt;
+    if (handbrake) car.speed *= Math.max(0, 1 - 3.2 * dt);
+    else if (!wantW && !wantS) car.speed *= Math.max(0, 1 - 0.5 * dt);
+    car.speed = clamp(car.speed, -9, topSpeed);
+  } else {
+    car.speed *= Math.max(0, 1 - 2 * dt);
+    if (Math.abs(car.speed) < 0.05) car.speed = 0;
+  }
+  let steer = 0;
+  if (keys.has('KeyA') || keys.has('ArrowLeft')) steer += 1;
+  if (keys.has('KeyD') || keys.has('ArrowRight')) steer -= 1;
+  const spd = Math.abs(car.speed);
+  if (steer !== 0 && spd > 0.2) {
+    car.heading += steer * 1.55 * dt * clamp(spd / 6, 0, 1) * (car.speed >= 0 ? 1 : -1);
+  }
+  const nx = car.pos.x + Math.sin(car.heading) * car.speed * dt;
+  const nz = car.pos.z + Math.cos(car.heading) * car.speed * dt;
+  const hit = circleHits(nx, nz, 1.7);
+  if (hit) {
+    const impact = Math.abs(car.speed);
+    const [px, pz] = pushOut(nx, nz, 1.7);
+    car.pos.x = px; car.pos.z = pz;
+    if (impact > 6 && G.time - carBumpAt > 1) {
+      carBumpAt = G.time;
+      car.health = Math.max(0, car.health - 4);
+      if (car.health <= 0) car.disabled = true;
+      sfx('crash');
+      fxCall('burst', car.pos.x, 1, car.pos.z);
+      fxCall('shake', 0.35);
+    }
+    car.speed *= -0.25;
+  } else {
+    car.pos.x = nx; car.pos.z = nz;
+  }
+  // Shunt traffic: push other cars aside, small damage on hard hits.
+  for (const other of G.cars) {
+    if (other === car || other.isPolice) continue;
+    const d = dist2(car.pos.x, car.pos.z, other.pos.x, other.pos.z);
+    if (d < 3.4 && d > 0.01) {
+      const push = (3.4 - d) / 2;
+      const ux = (other.pos.x - car.pos.x) / d, uz = (other.pos.z - car.pos.z) / d;
+      other.pos.x += ux * push; other.pos.z += uz * push;
+      if (Math.abs(car.speed) > 10 && G.time - carBumpAt > 1) {
+        carBumpAt = G.time;
+        car.health = Math.max(0, car.health - 4);
+        sfx('crash');
+      }
+    }
+  }
+  pl.pos.set(car.pos.x, 0, car.pos.z);
+  pl.heading = car.heading;
+  // Camera eases behind the car so driving feels stable.
+  pl.camYaw = angLerp(pl.camYaw, car.heading, dt * 0.55);
+}
+
+function syncPlayerMesh() {
+  const pl = G.player;
+  const mesh = pl.mesh || (G.playerController && G.playerController.mesh) || G.playerMesh || (G.meshes && G.meshes.player);
+  if (!mesh || !mesh.position) return;
+  mesh.position.set(pl.pos.x, pl.pos.y, pl.pos.z);
+  mesh.rotation.y = pl.heading;
+  if (mesh.visible === false && G.mode === 'playing') mesh.visible = true;
+}
+
+// --------------------------------------------------------------- camera
+function updateCamera(dt) {
+  const pl = G.player;
+  const driving = !!pl.car;
+  const dist = driving ? 11 : camDist;
+  const height = driving ? 4.6 : camHeight;
+  const yaw = pl.camYaw;
+  const pitch = pl.camPitch;
+  const look = new THREE.Vector3(pl.pos.x, pl.pos.y + 1.6, pl.pos.z);
+  const back = new THREE.Vector3(
+    look.x - Math.sin(yaw) * Math.cos(pitch) * dist,
+    look.y + Math.sin(pitch) * dist + height * 0.35,
+    look.z - Math.cos(yaw) * Math.cos(pitch) * dist
+  );
+  // Building keep-out: never let the camera sit inside a building.
+  const fixed = keepCameraClear(look, back);
+  camera.position.lerp(fixed, dt > 0 ? Math.min(1, dt * 14) : 1);
+  camera.lookAt(look);
+  if (G.fx && typeof G.fx.applyShake === 'function') {
+    try { G.fx.applyShake(camera); } catch (e) { /* ignore */ }
+  }
+}
+
+// Walk the segment from the player to the wanted camera spot; stop just
+// short of the first building the segment would cross.
+function keepCameraClear(from, to) {
+  const steps = 14;
+  let last = from.clone();
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const px = lerp(from.x, to.x, t), pz = lerp(from.z, to.z, t);
+    if (circleHits(px, pz, 0.9)) return new THREE.Vector3(last.x, Math.max(last.y, 1.4), last.z);
+    last.set(px, lerp(from.y, to.y, t), pz);
+  }
+  const out = to.clone();
+  out.y = Math.max(out.y, 1.4);
+  return out;
+}
+
+// On start / continue, snap the camera to a spot with a clear view.
+export function snapCameraClear() {
+  const pl = G.player;
+  for (const d of [8, 10, 6, 12]) {
+    for (const a of [0, 0.7, -0.7, 1.4, -1.4, Math.PI]) {
+      const yaw = pl.camYaw + a;
+      const cx = pl.pos.x - Math.sin(yaw) * d;
+      const cz = pl.pos.z - Math.cos(yaw) * d;
+      if (!circleHits(cx, cz, 1)) {
+        camera.position.set(cx, pl.pos.y + 3.4, cz);
+        return;
+      }
+    }
+  }
+}
+
+// -------------------------------------------------------------------- hud
+function updateHud(dt) {
+  if (!hudApi) return;
+  // Interact prompt, recomputed every frame.
+  let prompt = '';
+  const pl = G.player;
+  if (G.mode === 'playing') {
+    if (pl.car) {
+      const m = G.markers.spray;
+      if (m && dist2(pl.car.pos.x, pl.car.pos.z, m.x, m.z) <= 8) {
+        prompt = 'Press F — Pay N Spray ($100)';
+      } else if (G.taxi && G.taxi.phase === 'ride') {
+        prompt = '';
+      } else if (G.race && G.race.phase === 'none' && G.missions &&
+          typeof G.missions.racePadNear === 'function' && G.missions.racePadNear()) {
+        prompt = 'Press G — Street Race ($100–$200)';
+      } else {
+        prompt = 'Press E to exit the car';
+      }
+    } else {
+      const car = nearestCar(5);
+      if (car) prompt = 'Press E to steal the car';
+      else if (G.taxi && G.taxi.phase === 'wait' && G.taxi.client) {
+        if (dist2(pl.pos.x, pl.pos.z, G.taxi.client.pos.x, G.taxi.client.pos.z) < 8) prompt = 'Press T — Taxi fare';
+      }
+      if (!prompt && G.missions && typeof G.missions.dispatcherPosition === 'function') {
+        const dp = G.missions.dispatcherPosition();
+        if (dp && dist2(pl.pos.x, pl.pos.z, dp.x, dp.z) < 6) prompt = 'Press C — Courier parcel';
+      }
+    }
+  }
+  if (typeof hudApi.setInteract === 'function') {
+    try { hudApi.setInteract(prompt); } catch (e) { /* ignore */ }
+  }
+  callMethod(hudApi, ['update', 'step', 'tick', 'render'], dt);
+}
+
+function updateAudio(dt) {
+  if (!audioApi) return;
+  const pl = G.player;
+  const speed = pl.car ? Math.abs(pl.car.speed) : 0;
+  callMethod(audioApi, ['setEngine'], speed, !!pl.car);
+  callMethod(audioApi, ['setSiren'], G.wanted > 0);
+  callMethod(audioApi, ['musicTick'], dt);
+}
+
+// ------------------------------------------------------- screens + flow
+function busted() {
+  if (G.mode !== 'playing') return;
+  G.mode = 'busted';
+  callMethod(G.police, ['clearWanted']);
+  callMethod(G.missions, ['cancelSideJobs']);
+  show($('busted-screen'));
+  sfx('fail');
+}
+function wasted() {
+  if (G.mode !== 'playing') return;
+  G.mode = 'wasted';
+  callMethod(G.police, ['clearWanted']);
+  callMethod(G.missions, ['cancelSideJobs']);
+  show($('wasted-screen'));
+  sfx('fail');
+}
+export function hurt(n) {
+  if (G.mode !== 'playing') return;
+  G.health = Math.max(0, G.health - n);
+  G.player.health = G.health;
+  if (G.health <= 0) wasted();
+}
+
+function respawn() {
+  hide($('busted-screen')); hide($('wasted-screen')); hide($('pause-menu'));
+  G.health = 100; G.player.health = 100;
+  G.player.invuln = 3;
+  G.cash = Math.max(0, G.cash - 25);
+  if (G.player.car) { G.player.car.parked = true; G.player.car = null; }
+  const h = G.markers.hospital;
+  const [hx, hz] = findClearSpot(h.x, h.z, 2);
+  G.player.pos.set(hx, 0, hz);
+  G.player.vy = 0;
+  G.player.camYaw = 0;
+  callMethod(G.police, ['clearWanted']);
+  callMethod(G.missions, ['cancelSideJobs']);
+  G.mode = 'playing';
+  snapCameraClear();
+  say('You woke up at the hospital (-$25)');
+}
+
+function showBriefing(title, text) {
+  const t = $('briefing-title'), x = $('briefing-text');
+  if (t) t.textContent = title;
+  if (x) x.textContent = text;
+  show($('briefing'));
+  hide($('title-screen'));
+  G.mode = 'briefing';
+}
+
+function wireButtons() {
+  const on = (id, fn) => { const el = $(id); if (el) el.addEventListener('click', fn); };
+  on('btn-start', () => {
+    sfx('ensure'); sfx('startMusic');
+    hide($('title-screen')); show($('hud'));
+    // Fresh run.
+    G.cash = 0; G.wanted = 0; G.health = 100; G.player.health = 100;
+    G.mission = 0; G.missionStep = 0;
+    G.player.pos.set(0, 0, 120); G.player.camYaw = 0; G.player.car = null;
+    G.player.hasPistol = false; G.player.ammo = 0; G.player.weapon = 'fists';
+    callMethod(G.missions, ['startMission'], 0);
+    snapCameraClear();
+  });
+  on('btn-continue', () => {
+    sfx('ensure');
+    if (!loadNow()) { say('No save found'); return; }
+    hide($('title-screen')); show($('hud'));
+    callMethod(G.missions, ['restoreForStep']);
+    snapCameraClear();
+  });
+  on('btn-briefing', () => {
+    hide($('briefing'));
+    G.mode = 'playing';
+    sfx('ensure'); sfx('startMusic');
+  });
+  on('btn-resume', () => { G.mode = 'playing'; hide($('pause-menu')); });
+  on('btn-restart-mission', () => {
+    hide($('pause-menu'));
+    callMethod(G.missions, ['restartMission']);
+    G.mode = 'playing';
+  });
+  on('btn-save', () => {
+    saveNow();
+    const note = $('pause-save-note'); if (note) note.textContent = 'Saved.';
+  });
+  on('btn-quit-title', () => {
+    hide($('pause-menu')); hide($('hud'));
+    G.mode = 'title';
+    show($('title-screen'));
+  });
+  on('btn-mission-ok', () => {
+    hide($('mission-panel'));
+    callMethod(G.missions, ['advanceToNext']);
+  });
+  on('btn-busted', respawn);
+  on('btn-wasted', respawn);
+  on('btn-ending', () => {
+    hide($('ending-screen')); hide($('hud'));
+    G.mode = 'title';
+    show($('title-screen'));
+  });
+}
+
+// ------------------------------------------------------------- save/load
+const SAVE_KEY = 'neon-harbor-save-v1';
+
+function buildSaveObject() {
+  const pl = G.player;
+  const car = pl.car;
+  return {
+    version: 1,
+    mission: G.mission, step: G.missionStep,
+    cash: G.cash, health: G.health,
+    player: { x: pl.pos.x, z: pl.pos.z, heading: pl.heading },
+    car: car ? {
+      model: car.model, color: car.color, name: car.name,
+      special: !!car.special, x: car.pos.x, z: car.pos.z,
+      heading: car.heading, health: car.health,
+    } : null,
+  };
+}
+
+function saveNow() {
+  // Prefer the save module when it offers a save; otherwise write the
+  // documented shape straight to localStorage.
+  const viaModule = callMethod(saveApi, ['save', 'saveGame'], G) ??
+    callMethod(saveMod, ['save', 'saveGame'], G);
+  if (viaModule !== undefined && viaModule !== null) {
+    try { if (localStorage.getItem(SAVE_KEY)) return true; } catch (e) { /* ignore */ }
+  }
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify(buildSaveObject()));
+    return true;
+  } catch (e) { return false; }
+}
+
+function applySave(obj) {
+  if (!obj) return false;
+  G.mission = obj.mission || 0;
+  G.missionStep = obj.step || 0;
+  G.missionActive = true;
+  G.freeRoam = false;
+  G.cash = obj.cash || 0;
+  G.health = obj.health == null ? 100 : obj.health;
+  G.player.health = G.health;
+  if (obj.player) {
+    G.player.pos.set(obj.player.x || 0, 0, obj.player.z || 120);
+    G.player.heading = obj.player.heading || 0;
+    G.player.camYaw = obj.player.heading || 0;
+  }
+  if (obj.car) {
+    // Restore the driven car by name: reuse a parked car of the same
+    // model, or re-skin any parked car, and park it at a clear spot.
+    let car = G.cars.find((c) => !c.isPolice && c.parked && c.model === obj.car.model);
+    if (!car) car = G.cars.find((c) => !c.isPolice && c.parked);
+    if (car) {
+      car.model = obj.car.model; car.color = obj.car.color;
+      car.name = obj.car.name; car.special = !!obj.car.special;
+      car.health = obj.car.health == null ? 100 : obj.car.health;
+      car.disabled = car.health <= 0;
+      const [cx, cz] = findClearSpot(obj.car.x, obj.car.z, 2.5);
+      car.pos.set(cx, 0, cz);
+      car.heading = obj.car.heading || 0;
+      car.speed = 0; car.parked = false;
+      G.player.car = car;
+      G.player.heading = car.heading;
+      G.player.camYaw = car.heading;
+    }
+  }
+  G.wanted = 0;
+  callMethod(G.police, ['clearWanted']);
+  G.mode = 'briefing';
+  return true;
+}
+
+function loadNow() {
+  let obj = null;
+  const viaModule = callMethod(saveApi, ['load', 'loadGame'], G) ??
+    callMethod(saveMod, ['load', 'loadGame'], G);
+  if (viaModule && typeof viaModule === 'object' && viaModule.mission != null) obj = viaModule;
+  if (!obj) {
+    try {
+      const raw = localStorage.getItem(SAVE_KEY);
+      if (raw) obj = JSON.parse(raw);
+    } catch (e) { obj = null; }
+  }
+  if (!obj) return false;
+  return applySave(obj);
+}
+
+// ---------------------------------------------------------- debug surface
+function exposeDebug() {
+  const api = {
+    get mode() { return G.mode; },
+    get pos() { return { x: G.player.pos.x, z: G.player.pos.z }; },
+    setRender(v) { renderEnabled = !!v; },
+    step,
+    G,
+    pressKey: (code, down) => handleKey(code, !!down),
+    get player() { return G.player; },
+    get time() { return G.time; },
+    get mission() { return G.mission; },
+    get missionStep() { return G.missionStep; },
+    get taxiPhase() { return G.taxi ? G.taxi.phase : 'none'; },
+    get taxiFare() { return G.taxi ? (G.taxi.fare || 0) : 0; },
+    get courierPhase() { return G.courier ? G.courier.phase : 'none'; },
+    get racePhase() { return G.race ? G.race.phase : 'none'; },
+    get raceGate() { return G.race ? G.race.gate : 0; },
+    get racePay() { return G.race ? G.race.pay : 0; },
+    get heliActive() { return !!(G.police && typeof G.police.heliActive === 'function' && G.police.heliActive()); },
+    get driving() { return !!G.player.car; },
+    get carName() { return G.player.car ? (G.player.car.name || '') : ''; },
+    get wanted() { return G.wanted; },
+    get cash() { return G.cash; },
+    get carHealth() { return G.player.car ? G.player.car.health : 100; },
+    get policeCars() { return G.policeCars ? G.policeCars.length : 0; },
+    get health() { return G.health; },
+    hurt,
+    teleport(x, z) {
+      const pl = G.player;
+      pl.pos.set(x, 0, z);
+      pl.vy = 0;
+      if (pl.car) { pl.car.pos.set(x, 0, z); pl.car.speed = 0; }
+      snapCameraClear();
+    },
+    snapCameraClear,
+    showBriefing,
+    saveNow,
+    loadNow,
+  };
+  window.__game = api;
+  G.debug = api;
+}
+
+// Auto-boot once the DOM is ready.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', boot);
+} else {
+  boot();
+}
