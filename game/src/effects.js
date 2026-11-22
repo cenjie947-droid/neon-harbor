@@ -8,11 +8,24 @@
 //
 // The driver reads game.fx.particles.length to confirm a damaged car
 // is smoking, so particles must be real scene meshes in that array.
+//
+// Position arguments accept either a THREE.Vector3 or plain numeric
+// coordinates: vehicles.js passes vectors (burst(at, ...),
+// smokePuff(hood)), while combat.js passes numbers (burst(x, y, z,
+// ...), muzzle(x, y, z), tracer(x1, y1, z1, x2, y2, z2)). Both forms
+// resolve to the same point.
 
 import * as THREE from 'three';
 import { rand } from './state.js';
 
 const MAX_PARTICLES = 400;
+
+// Normalise a position argument: a Vector3 is used as-is, three
+// numbers become a fresh Vector3.
+function toVec(a, b, c) {
+  if (a !== null && typeof a === 'object') return a;
+  return new THREE.Vector3(a ?? 0, b ?? 0, c ?? 0);
+}
 
 export class Effects {
   constructor(game) {
@@ -43,7 +56,25 @@ export class Effects {
   }
 
   // A spray of small coloured cubes flying out from a point.
-  burst(at, color, count = 12, speed = 6, size = 0.22) {
+  // burst(at, color, count, speed, size) or burst(x, y, z, color, count).
+  burst(a, b, c, d, e, f) {
+    let at;
+    let color;
+    let count = 12;
+    let speed = 6;
+    let size = 0.22;
+    if (a !== null && typeof a === 'object') {
+      at = a;
+      color = b;
+      count = c ?? 12;
+      speed = d ?? 6;
+      size = e ?? 0.22;
+    } else {
+      at = new THREE.Vector3(a, b, c);
+      color = d;
+      count = e ?? 12;
+      speed = f ?? 6;
+    }
     for (let i = 0; i < count; i++) {
       const mat = new THREE.MeshBasicMaterial({ color, transparent: true });
       const mesh = new THREE.Mesh(new THREE.BoxGeometry(size, size, size), mat);
@@ -56,7 +87,8 @@ export class Effects {
   }
 
   // One soft grey smoke puff, rising and swelling as it fades.
-  smokePuff(at) {
+  smokePuff(a, b, c) {
+    const at = toVec(a, b, c);
     const mat = new THREE.MeshBasicMaterial({
       color: 0x8a8a8a, transparent: true, opacity: 0.55,
     });
@@ -67,7 +99,8 @@ export class Effects {
   }
 
   // A crash explosion: orange fireball, dark smoke and a spray of sparks.
-  explosion(at) {
+  explosion(a, b, c) {
+    const at = toVec(a, b, c);
     const fireMat = new THREE.MeshBasicMaterial({ color: 0xff7a20, transparent: true });
     const fire = new THREE.Mesh(new THREE.SphereGeometry(1.1, 10, 8), fireMat);
     fire.position.copy(at);
@@ -85,19 +118,40 @@ export class Effects {
     if (this.game.audio) this.game.audio.crash();
   }
 
-  // A brief muzzle flash at the gun's tip, pointing along `dir`.
-  muzzle(origin, dir) {
+  // A brief muzzle flash at the gun's tip. muzzle(origin, dir) with
+  // vectors, or muzzle(x, y, z) with plain coordinates.
+  muzzle(a, b, c) {
+    let origin;
+    let dir = null;
+    if (a !== null && typeof a === 'object') {
+      origin = a;
+      dir = b;
+    } else {
+      origin = new THREE.Vector3(a, b, c);
+    }
     const mat = new THREE.MeshBasicMaterial({ color: 0xffe9a0, transparent: true });
     const flash = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.9, 6), mat);
     flash.position.copy(origin);
-    flash.position.addScaledVector(dir, 0.45);
-    flash.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
+    if (dir) {
+      flash.position.addScaledVector(dir, 0.45);
+      flash.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
+    }
     this.add(flash, new THREE.Vector3(0, 0, 0), 0.09, { fade: true });
   }
 
-  // A thin bright line from `from` to `to` that vanishes in a blink —
-  // the visible path of a bullet.
-  tracer(from, to) {
+  // A thin bright line from one point to another that vanishes in a
+  // blink — the visible path of a bullet. tracer(from, to) with
+  // vectors, or tracer(x1, y1, z1, x2, y2, z2) with numbers.
+  tracer(a, b, c, d, e, f) {
+    let from;
+    let to;
+    if (a !== null && typeof a === 'object') {
+      from = a;
+      to = b;
+    } else {
+      from = new THREE.Vector3(a, b, c);
+      to = new THREE.Vector3(d, e, f);
+    }
     const length = from.distanceTo(to);
     if (length < 0.5) return;
     const mat = new THREE.MeshBasicMaterial({ color: 0xffe9a0, transparent: true });

@@ -2,11 +2,11 @@
 //
 // A car is a plain object with a THREE group for a mesh. Heading uses
 // the same convention as the player: forward is (sin h, cos h), so a
-// heading of 0 points north (toward -z on the minimap's north-up view is
-// handled by the HUD, not here). Cars drive with a sustained-acceleration
+// heading of 0 points north. Cars drive with a sustained-acceleration
 // model — hold W to build speed, S to brake or reverse — and take
 // damage from hard hits: below 60 health they lose pace, below 35 they
-// trail smoke from the hood, at 0 they are disabled and will not move.
+// trail smoke from the hood, at 0 they are disabled and will not move
+// until the Pay N Spray fixes them.
 //
 // Stealing is measured to the car's oriented body box, not its centre,
 // so the prompt appears from any side of the car out to STEAL_REACH.
@@ -25,6 +25,10 @@ const CAR_NAMES = [
   'Pier Cruiser', 'Sunset GT', 'Dockside', 'Marina', 'Palma',
 ];
 const VAN_NAMES = ['Hauler', 'Cargo King', 'Dock Van'];
+
+const WHEEL_SPOTS = [
+  [-1, 0.32], [1, 0.32], [-1, -0.32], [1, -0.32],
+];
 
 // --- mesh building -------------------------------------------------------
 
@@ -49,10 +53,10 @@ export function makeCarMesh(color, isVan = false, isPolice = false) {
   group.add(body);
 
   if (isVan) {
-    const box = new THREE.Mesh(new THREE.BoxGeometry(wid - 0.1, 1.5, len * 0.62), paint);
-    box.position.set(0, 1.5, -len * 0.14);
-    box.castShadow = true;
-    group.add(box);
+    const cargo = new THREE.Mesh(new THREE.BoxGeometry(wid - 0.1, 1.5, len * 0.62), paint);
+    cargo.position.set(0, 1.5, -len * 0.14);
+    cargo.castShadow = true;
+    group.add(cargo);
     const cab = new THREE.Mesh(new THREE.BoxGeometry(wid - 0.2, 0.8, 1.1), glass);
     cab.position.set(0, 1.25, len * 0.32);
     group.add(cab);
@@ -66,40 +70,49 @@ export function makeCarMesh(color, isVan = false, isPolice = false) {
     group.add(hood);
   }
 
-  // Bumpers, lights and grille.
+  // Bumpers, headlights and tail lights.
   const bumperF = new THREE.Mesh(new THREE.BoxGeometry(wid + 0.06, 0.28, 0.25), dark);
   bumperF.position.set(0, 0.42, len / 2);
   group.add(bumperF);
   const bumperR = bumperF.clone();
   bumperR.position.z = -len / 2;
   group.add(bumperR);
-  const lightMat = new THREE.MeshStandardMaterial({
+  const headMat = new THREE.MeshStandardMaterial({
     color: 0xfff2b0, emissive: 0xffe9a0, emissiveIntensity: 0.7, roughness: 0.3,
   });
+  const tailMat = new THREE.MeshStandardMaterial({
+    color: 0xc82828, emissive: 0x881818, emissiveIntensity: 0.6,
+  });
   for (const s of [-1, 1]) {
-    const hl = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.2, 0.1), lightMat);
+    const hl = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.2, 0.1), headMat);
     hl.position.set(s * (wid / 2 - 0.35), 0.72, len / 2 + 0.02);
     group.add(hl);
-    const tl = new THREE.Mesh(
-      new THREE.BoxGeometry(0.42, 0.2, 0.1),
-      new THREE.MeshStandardMaterial({ color: 0xc82828, emissive: 0x881818, emissiveIntensity: 0.6 }),
-    );
+    const tl = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.2, 0.1), tailMat);
     tl.position.set(s * (wid / 2 - 0.35), 0.72, -len / 2 - 0.02);
     group.add(tl);
   }
 
   if (isPolice) {
     // White doors and a red/blue light bar.
-    const door = new THREE.Mesh(new THREE.BoxGeometry(wid + 0.04, 0.5, len * 0.4), new THREE.MeshStandardMaterial({ color: 0xf0f0f0, roughness: 0.4, metalness: 0.3 }));
+    const door = new THREE.Mesh(
+      new THREE.BoxGeometry(wid + 0.04, 0.5, len * 0.4),
+      new THREE.MeshStandardMaterial({ color: 0xf0f0f0, roughness: 0.4, metalness: 0.3 }),
+    );
     door.position.set(0, 0.62, 0);
     group.add(door);
     const barBase = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.16, 0.35), dark);
     barBase.position.set(0, 1.72, -len * 0.06);
     group.add(barBase);
-    const red = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.2, 0.36), new THREE.MeshStandardMaterial({ color: 0xff2020, emissive: 0xff2020, emissiveIntensity: 1 }));
+    const red = new THREE.Mesh(
+      new THREE.BoxGeometry(0.5, 0.2, 0.36),
+      new THREE.MeshStandardMaterial({ color: 0xff2020, emissive: 0xff2020, emissiveIntensity: 1 }),
+    );
     red.position.set(-0.28, 1.78, -len * 0.06);
     group.add(red);
-    const blue = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.2, 0.36), new THREE.MeshStandardMaterial({ color: 0x2040ff, emissive: 0x2040ff, emissiveIntensity: 1 }));
+    const blue = new THREE.Mesh(
+      new THREE.BoxGeometry(0.5, 0.2, 0.36),
+      new THREE.MeshStandardMaterial({ color: 0x2040ff, emissive: 0x2040ff, emissiveIntensity: 1 }),
+    );
     blue.position.set(0.28, 1.78, -len * 0.06);
     group.add(blue);
     group.userData.lightRed = red;
@@ -108,21 +121,18 @@ export function makeCarMesh(color, isVan = false, isPolice = false) {
 
   // Wheels.
   const wheels = [];
-  const tyre = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.95 });
+  const tyreMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.95 });
   const hubMat = new THREE.MeshStandardMaterial({ color: 0xb8bcc0, roughness: 0.3, metalness: 0.8 });
-  for (const [wx, wz] of [
-    [-wid / 2, len * 0.32], [wid / 2, len * 0.32],
-    [-wid / 2, -len * 0.32], [wid / 2, -len * 0.32],
-  ]) {
+  for (const [sx, sz] of WHEEL_SPOTS) {
     const wheel = new THREE.Group();
-    const tyreMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.36, 0.28, 14), tyre);
+    const tyreMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.36, 0.28, 14), tyreMat);
     tyreMesh.rotation.z = Math.PI / 2;
     tyreMesh.castShadow = true;
     wheel.add(tyreMesh);
     const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.18, 0.3, 10), hubMat);
     hub.rotation.z = Math.PI / 2;
     wheel.add(hub);
-    wheel.position.set(wx, 0.36, wz);
+    wheel.position.set(sx * wid / 2, 0.36, sz * len);
     group.add(wheel);
     wheels.push(wheel);
   }
@@ -157,6 +167,7 @@ export function createCar(world, opts = {}) {
     cruise: opts.cruise ?? rand(10, 14),
     turnCooldown: 0,
     smokeTimer: 0,
+    bumpCooldown: 0, // one bump-damage tick per second, see drivePlayerCar
     parked: !!opts.parked,
     owned: false,
     name: opts.name || (isVan ? pick(VAN_NAMES) : pick(CAR_NAMES)),
@@ -202,8 +213,9 @@ export function spawnParkedCars(world) {
     const axis = Math.random() < 0.5 ? 'x' : 'z';
     const line = pick(game.roads.xs);
     const along = rand(-170, 170);
-    if (axis === 'x') spots.push({ x: along, z: line + (Math.random() < 0.5 ? 6.5 : -6.5), heading: Math.PI / 2 });
-    else spots.push({ x: line + (Math.random() < 0.5 ? 6.5 : -6.5), z: along, heading: 0 });
+    const off = Math.random() < 0.5 ? 6.5 : -6.5;
+    if (axis === 'x') spots.push({ x: along, z: line + off, heading: Math.PI / 2 });
+    else spots.push({ x: line + off, z: along, heading: 0 });
   }
   const made = [];
   for (const s of spots) {
@@ -223,9 +235,11 @@ export function spawnTraffic(world, count = 14) {
     const line = pick(game.roads.xs);
     const along = rand(-180, 180);
     const dir = Math.random() < 0.5 ? 1 : -1;
-    const x = axis === 'x' ? along : line + dir * 0;
+    const x = axis === 'x' ? along : line;
     const z = axis === 'x' ? line : along;
-    const heading = axis === 'x' ? (dir > 0 ? Math.PI / 2 : -Math.PI / 2) : (dir > 0 ? 0 : Math.PI);
+    const heading = axis === 'x'
+      ? (dir > 0 ? Math.PI / 2 : -Math.PI / 2)
+      : (dir > 0 ? 0 : Math.PI);
     made.push(createCar(game, {
       x, z, heading, traffic: true, roadAxis: axis, roadLine: line,
       dir, cruise: rand(9, 14), isVan: Math.random() < 0.15,
@@ -341,6 +355,7 @@ export function drivePlayerCar(world, dt) {
   if (!car) return;
   const keys = game.input.keys;
   const factor = damageFactor(car);
+  car.bumpCooldown = Math.max(0, (car.bumpCooldown || 0) - dt);
   const topSpeed = 30 * factor;
   const reverseTop = 9 * factor;
   const accel = 15 * factor;
@@ -399,9 +414,13 @@ export function drivePlayerCar(world, dt) {
       const uz = dz / d;
       nx += ux * push;
       nz += uz * push;
-      if (!other.traffic && Math.abs(car.speed) > 6) {
+      if (!other.traffic && Math.abs(car.speed) > 6 && car.bumpCooldown <= 0) {
+        // One tick per shunt, not per frame: without the cooldown a
+        // cruiser pinning the car costs 4 hp every frame (up to 80/s),
+        // which turns the "shunt, not an execution" ram into a kill.
         damageCar(game, car, 4);
         damageCar(game, other, 4);
+        car.bumpCooldown = 1;
       }
       if (other.traffic) {
         other.pos.x -= ux * push;
@@ -463,15 +482,18 @@ export function updateTraffic(world, dt) {
     let nz = car.pos.z + fz * car.speed * dt;
 
     // At an intersection, sometimes turn onto the cross road.
-    const nearX = car.roadAxis === 'x' ? game.roads.xs.reduce((a, b) => (Math.abs(b - car.pos.x) < Math.abs(a - car.pos.x) ? b : a)) : null;
-    const nearZ = car.roadAxis === 'z' ? game.roads.zs.reduce((a, b) => (Math.abs(b - car.pos.z) < Math.abs(a - car.pos.z) ? b : a)) : null;
-    const atJunction = car.turnCooldown <= 0 && (
+    const nearX = car.roadAxis === 'x'
+      ? game.roads.xs.reduce((a, b) => (Math.abs(b - car.pos.x) < Math.abs(a - car.pos.x) ? b : a))
+      : null;
+    const nearZ = car.roadAxis === 'z'
+      ? game.roads.zs.reduce((a, b) => (Math.abs(b - car.pos.z) < Math.abs(a - car.pos.z) ? b : a))
+      : null;
+    const onJunction = car.turnCooldown <= 0 && (
       (car.roadAxis === 'x' && Math.abs(car.pos.x - (nearX ?? 999)) < 2.5) ||
       (car.roadAxis === 'z' && Math.abs(car.pos.z - (nearZ ?? 999)) < 2.5)
     );
-    if (atJunction && Math.random() < 0.35) {
+    if (onJunction && Math.random() < 0.35) {
       const turnLeft = Math.random() < 0.5;
-      const newHeading = car.heading + (turnLeft ? -Math.PI / 2 : Math.PI / 2);
       if (car.roadAxis === 'x') {
         car.roadAxis = 'z';
         car.roadLine = nearX;
@@ -481,7 +503,7 @@ export function updateTraffic(world, dt) {
         car.roadLine = nearZ;
         car.pos.z = nearZ;
       }
-      car.heading = newHeading;
+      car.heading += turnLeft ? -Math.PI / 2 : Math.PI / 2;
       car.turnCooldown = 4;
       // Recompute the step from the turned heading.
       nx = car.pos.x + Math.sin(car.heading) * car.speed * dt;
@@ -508,9 +530,8 @@ export function updateTraffic(world, dt) {
   }
 }
 
-// Keep the import of angleLerp honest: traffic easing uses it when a
-// cruiser's heading is nudged by the police module through heading
-// changes (exported here for reuse by other modules).
+// Ease a car's heading toward a target (used by police steering).
+// Exported here for reuse by other modules.
 export function easeHeading(car, target, dt) {
   car.heading = angleLerp(car.heading, target, Math.min(1, 3 * dt));
 }

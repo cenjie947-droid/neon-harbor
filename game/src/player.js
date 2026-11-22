@@ -19,7 +19,8 @@ const GRAVITY = 22;
 const JUMP_VELOCITY = 8.5;
 
 // Build Cole: a simple stylised figure — dark jacket, jeans, boots —
-// with separate arm meshes so the punch animation can swing one.
+// with separate arm meshes so the punch animation can swing one, and a
+// pistol tucked into the right arm, hidden until it is the active weapon.
 function buildColeMesh() {
   const group = new THREE.Group();
   const jacket = new THREE.MeshStandardMaterial({ color: 0x2a3440, roughness: 0.85 });
@@ -84,9 +85,15 @@ function buildColeMesh() {
 
   // Pistol, hidden until the pistol is the active weapon.
   const gun = new THREE.Group();
-  const barrel = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.1, 0.42), new THREE.MeshStandardMaterial({ color: 0x1a1a1e, roughness: 0.4, metalness: 0.7 }));
+  const barrel = new THREE.Mesh(
+    new THREE.BoxGeometry(0.06, 0.1, 0.42),
+    new THREE.MeshStandardMaterial({ color: 0x1a1a1e, roughness: 0.4, metalness: 0.7 }),
+  );
   gun.add(barrel);
-  const grip = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.18, 0.1), new THREE.MeshStandardMaterial({ color: 0x2a2018, roughness: 0.8 }));
+  const grip = new THREE.Mesh(
+    new THREE.BoxGeometry(0.06, 0.18, 0.1),
+    new THREE.MeshStandardMaterial({ color: 0x2a2018, roughness: 0.8 }),
+  );
   grip.position.set(0, -0.12, -0.14);
   gun.add(grip);
   gun.position.set(0, -0.66, 0.12);
@@ -106,6 +113,7 @@ export function createPlayer(game) {
     mesh: built.group,
     group: built.group,
     weapon: 'fists',
+    hasPistol: false,
     ammo: 12,
     shootCooldown: 0,
     punchAnim: 0,
@@ -206,7 +214,7 @@ export function updatePlayer(game, dt) {
   player.pos.x = nx;
   player.pos.z = nz;
 
-  // Face the direction of travel; stand still and he faces the camera.
+  // Face the direction of travel; standing still he faces the camera.
   if (moving) {
     const targetHeading = Math.atan2(mx, mz);
     let diff = targetHeading - player.heading;
@@ -265,10 +273,6 @@ function updateCamera(game, dt) {
   const pitch = player.camPitch;
   const dist = car ? 10.5 : 7.5;
   const height = car ? 4.4 : 3.2;
-
-  const cx = focus.x + Math.sin(yaw) * Math.cos(pitch) * dist;
-  const cz = focus.z + Math.cos(yaw) * Math.cos(pitch) * dist;
-  const cy = focus.y + height - Math.sin(pitch) * dist * 0.6;
 
   // Pull the camera in if a building sits between it and the focus.
   let useDist = dist;

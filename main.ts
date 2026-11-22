@@ -31,7 +31,7 @@ const GATE = {
 const SCREENSHOT_NAMES = ['1-chase.jpg', '2-title.jpg', '3-drive.jpg', '4-mission.jpg'];
 
 // Where the repo lives, and where the grader expects the bundle.
-function locate() {
+function resolvePaths() {
   const root = dirname(fileURLToPath(import.meta.url));
   const dest = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
   return { root, dest };
@@ -39,14 +39,14 @@ function locate() {
 
 // Start from a clean output folder so a stale file from an earlier
 // bundle can never ride along into the graded entry.
-function freshDir(path) {
+function resetDir(path) {
   rmSync(path, { recursive: true, force: true });
   mkdirSync(path, { recursive: true });
 }
 
 // Copy the playable game and the four screenshots into the bundle.
-function bundle({ root, dest }) {
-  freshDir(dest);
+function packBundle({ root, dest }) {
+  resetDir(dest);
   cpSync(join(root, 'game'), join(dest, 'game'), { recursive: true });
   const shotsOut = join(dest, 'screenshots');
   mkdirSync(shotsOut, { recursive: true });
@@ -64,6 +64,6 @@ function writeDossier(dest) {
   writeFileSync(join(dest, 'dossier.json'), dossier);
 }
 
-const paths = locate();
-bundle(paths);
+const paths = resolvePaths();
+packBundle(paths);
 writeDossier(paths.dest);

@@ -12,7 +12,9 @@
 //
 // Keys: missionIndex, missionStep and car are the exact keys main.js
 // reads on Continue (with mission / step as fallbacks). Everything
-// else is extra context for a future reader of the slot.
+// else is extra context for a future reader of the slot. Old saves
+// (version 3, same key) still load: apply() only reads fields it
+// recognises and fills the rest with sane defaults.
 import { collideCircle } from './state.js';
 
 export const SAVE_KEY = 'neon-harbor-save-v1';
@@ -24,6 +26,11 @@ function num(v, fallback = 0) {
 
 function str(v, fallback = '') {
   return typeof v === 'string' && v ? v : fallback;
+}
+
+function clampInt(v, lo, hi, fallback = 0) {
+  if (!Number.isFinite(v)) return fallback;
+  return Math.max(lo, Math.min(hi, Math.floor(v)));
 }
 
 export class SaveData {
@@ -141,7 +148,7 @@ export class SaveData {
     if (Number.isFinite(mi)) g.missionIndex = Math.max(0, Math.floor(mi));
     const ms = data.missionStep ?? data.step;
     if (Number.isFinite(ms)) g.missionStep = Math.max(0, Math.floor(ms));
-    if (Number.isFinite(data.wanted)) g.wanted = Math.max(0, Math.min(5, Math.floor(data.wanted)));
+    if (Number.isFinite(data.wanted)) g.wanted = clampInt(data.wanted, 0, 5);
     this.restorePlayer(g, data);
     if (data.car) this.restoreCar(g, data.car);
     return true;
@@ -163,10 +170,14 @@ export class SaveData {
     if (typeof p.weapon === 'string') hero.weapon = p.weapon;
     if (Number.isFinite(p.ammo)) hero.ammo = p.ammo;
     if (typeof p.hasPistol === 'boolean') hero.hasPistol = p.hasPistol;
-    if (hero.mesh) hero.mesh.position.set(p.x, 0, p.z);
-    if (hero.group) hero.group.position.set(p.x, 0, p.z);
-    if (Number.isFinite(p.heading) && hero.mesh) hero.mesh.rotation.y = p.heading;
-    if (Number.isFinite(p.heading) && hero.group) hero.group.rotation.y = p.heading;
+    if (hero.mesh) {
+      hero.mesh.position.set(p.x, 0, p.z);
+      if (Number.isFinite(p.heading)) hero.mesh.rotation.y = p.heading;
+    }
+    if (hero.group) {
+      hero.group.position.set(p.x, 0, p.z);
+      if (Number.isFinite(p.heading)) hero.group.rotation.y = p.heading;
+    }
     return true;
   }
 

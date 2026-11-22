@@ -2,7 +2,10 @@
 //
 // The 0–5 star wanted system. Cruisers spawn 28–42 m away on the roads
 // and chase Cole; foot officers run him down on foot and grab him.
-// Heat only fades when nobody can see him for a full minute.
+// Heat only fades when nobody can see him for a full minute. At 3+
+// stars, cruisers park across the road ahead of him. At 4+ stars a
+// police helicopter circles overhead with a searchlight and the heat
+// stops fading while it watches.
 //
 // Two rules that cost a round each, built in from the start:
 //   - An officer's grab timer DECAYS on separation (Math.max(0, t - dt)),
@@ -29,6 +32,11 @@ const GRAB_RANGE = 1.8;         // an officer this close starts grabbing
 const GRAB_SECONDS = 2.5;       // held this long on foot and Cole is busted
 const ROADBLOCK_STARS = 3;      // roadblocks appear at this wanted level
 const ROADBLOCK_AHEAD = 60;     // metres ahead of Cole, on his road
+const HELI_STARS = 4;           // helicopter appears at this wanted level
+const HELI_LEAVE_STARS = 3;     // and flies away once heat drops below this
+const HELI_HEIGHT = 40;         // metres above the street
+const HELI_TRAIL = 25;          // metres behind Cole, above and back
+const HELI_LEAVE_SECONDS = 2.5;
 
 function wrapAngle(a) {
   while (a > Math.PI) a -= Math.PI * 2;
@@ -44,6 +52,8 @@ export class Police {
     this._officerTimer = 0;  // throttle between officer spawns
     this._rbTimer = 0;       // throttle between roadblock moves
     this._roadblocks = [];   // parked cruisers blocking the road ahead
+    this._heli = null;       // the police helicopter, if one is up
+    this._heliLeave = 0;     // seconds left of the fly-away, 0 = hovering
   }
 
   // -- HUD helpers ---------------------------------------------------------
@@ -53,6 +63,17 @@ export class Police {
 
   renderStars(w) {
     try { w.hud.renderStars(w.wanted); } catch (err) { /* hud optional */ }
+  }
+
+  // True while the helicopter is overhead (hovering, not leaving).
+  hasHeli() {
+    return !!this._heli && this._heliLeave <= 0;
+  }
+
+  // HUD minimap reads police.heli for the overhead dot/ring: the live
+  // heli object plus an active flag (it has a group, not a mesh field).
+  get heli() {
+    return this._heli ? { ...this._heli, active: true } : null;
   }
 
   // -- Wanted level --------------------------------------------------------
@@ -78,6 +99,7 @@ export class Police {
     }
     w.officers = [];
     this.clearRoadblocks(w);
+    this.removeHeli(w);
   }
 
   removeCar(w, car) {
@@ -265,9 +287,14 @@ export class Police {
     }
   }
 
-  // One star fades after a full minute genuinely unseen.
+  // One star fades after a full minute genuinely unseen. While the
+  // helicopter is overhead it can see Cole, so the clock never runs.
   coolDown(w, dt) {
     if (w.wanted <= 0) return;
+    if (this.hasHeli()) {
+      this._lastSeen = w.time;
+      return;
+    }
     if (w.time - this._lastSeen < HEAT_FADE_SECONDS) return;
     w.wanted -= 1;
     this._lastSeen = w.time;
@@ -474,12 +501,139 @@ export class Police {
     }
   }
 
+  // -- Helicopter: one bird at 4+ stars, searchlight on Cole -------------
+  // Built from boxes, no collisions, no audio, never in w.cars: it
+  // must not disturb the driver, the traffic sim or the save shape.
+  makeHeliMesh() {
+    const group = new THREE.Group();
+    const navy = new THREE.MeshStandardMaterial({ color: 0x1c2f57 });
+    const white = new THREE.MeshStandardMaterial({ color: 0xf2f2f2 });
+    const dark = new THREE.MeshStandardMaterial({ color: 0x101c33 });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(2.4, 1.5, 4.2), navy);
+    body.position.y = 0;
+    const stripe = new THREE.Mesh(new THREE.BoxGeometry(2.45, 0.35, 4.25), white);
+    stripe.position.y = 0.1;
+    const nose = new THREE.Mesh(new THREE.BoxGeometry(1.8, 1.0, 1.2), dark);
+    nose.position.set(0, -0.1, 2.4);
+    const tail = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 4.6), navy);
+    tail.position.set(0, 0.3, -4.2);
+    const fin = new THREE.Mesh(new THREE.BoxGeometry(0.18, 1.4, 0.9), navy);
+    fin.position.set(0, 0.9, -6.2);
+    const rotor = new THREE.Mesh(new THREE.BoxGeometry(9.5, 0.12, 0.5), dark);
+    rotor.position.y = 1.05;
+    const rotorCross = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.12, 9.5), dark);
+    rotorCross.position.y = 1.05;
+    const tailRotor = new THREE.Mesh(new THREE.BoxGeometry(0.1, 1.6, 0.35), dark);
+    tailRotor.position.set(0.35, 0.9, -6.2);
+    const skidL = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.18, 3.6), dark);
+    skidL.position.set(-1.0, -1.0, 0);
+    const skidR = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.18, 3.6), dark);
+    skidR.position.set(1.0, -1.0, 0);
+    group.add(body, stripe, nose, tail, fin, rotor, rotorCross, tailRotor, skidL, skidR);
+    return { group, rotor, rotorCross, tailRotor };
+  }
+
+  spawnHeli(w) {
+    if (this._heli || !w.scene) return null;
+    const p = w.player.pos;
+    const { group, rotor, rotorCross, tailRotor } = this.makeHeliMesh();
+    group.position.set(p.x, HELI_HEIGHT, p.z - HELI_TRAIL);
+    w.scene.add(group);
+    // Searchlight: a spotlight aimed at Cole plus a bright pool of
+    // light on the ground that tracks him.
+    const light = new THREE.SpotLight(0xfff2b0, 900, 160, 0.32, 0.45, 1.1);
+    light.position.set(p.x, HELI_HEIGHT, p.z - HELI_TRAIL);
+    w.scene.add(light);
+    w.scene.add(light.target);
+    const pool = new THREE.Mesh(
+      new THREE.CircleGeometry(7, 24),
+      new THREE.MeshBasicMaterial({
+        color: 0xfff2b0, transparent: true, opacity: 0.28,
+        depthWrite: false,
+      }),
+    );
+    pool.rotation.x = -Math.PI / 2;
+    pool.position.set(p.x, 0.12, p.z);
+    w.scene.add(pool);
+    this._heli = {
+      group, rotor, rotorCross, tailRotor, light, pool,
+      pos: new THREE.Vector3(p.x, HELI_HEIGHT, p.z - HELI_TRAIL),
+      heading: 0, spin: 0,
+    };
+    this._heliLeave = 0;
+    this.say(w, 'Police helicopter overhead — the eye in the sky has you.');
+    return this._heli;
+  }
+
+  removeHeli(w) {
+    const h = this._heli;
+    if (!h) return;
+    try {
+      if (h.group) w.scene.remove(h.group);
+      if (h.light) {
+        w.scene.remove(h.light);
+        if (h.light.target) w.scene.remove(h.light.target);
+      }
+      if (h.pool) w.scene.remove(h.pool);
+    } catch (err) { /* scene */ }
+    this._heli = null;
+    this._heliLeave = 0;
+  }
+
+  updateHeli(w, dt) {
+    if (!this._heli) {
+      if (w.wanted >= HELI_STARS) this.spawnHeli(w);
+      return;
+    }
+    const h = this._heli;
+    const p = w.player.pos;
+    // The eye in the sky sees Cole: wanted decay pauses while it hovers.
+    if (this._heliLeave <= 0) this._lastSeen = w.time;
+    // Spin the rotors every frame, hovering or leaving.
+    h.spin += dt * 22;
+    h.rotor.rotation.y = h.spin;
+    h.rotorCross.rotation.y = h.spin;
+    h.tailRotor.rotation.x = h.spin * 1.4;
+    if (w.wanted < HELI_LEAVE_STARS && this._heliLeave <= 0) {
+      this._heliLeave = HELI_LEAVE_SECONDS;
+    }
+    if (this._heliLeave > 0) {
+      // Fly up and away, then remove it.
+      this._heliLeave -= dt;
+      h.pos.y += 26 * dt;
+      h.pos.x += Math.sin(h.heading) * 30 * dt;
+      h.pos.z += Math.cos(h.heading) * 30 * dt;
+      h.light.intensity = Math.max(0, h.light.intensity * (1 - dt * 2));
+      h.pool.material.opacity = Math.max(0, h.pool.material.opacity - dt * 0.25);
+      h.group.position.copy(h.pos);
+      if (this._heliLeave <= 0) this.removeHeli(w);
+      return;
+    }
+    // Hover ~40 m up, ~25 m behind Cole's direction of travel, easing
+    // toward the spot so it trails him instead of snapping.
+    const heading = w.player.car ? w.player.car.heading : (w.player.heading || 0);
+    const tx = p.x - Math.sin(heading) * HELI_TRAIL;
+    const tz = p.z - Math.cos(heading) * HELI_TRAIL;
+    const ease = Math.min(1, dt * 1.6);
+    h.pos.x += (tx - h.pos.x) * ease;
+    h.pos.z += (tz - h.pos.z) * ease;
+    h.pos.y += (HELI_HEIGHT - h.pos.y) * Math.min(1, dt * 2);
+    h.heading = angleLerp(h.heading, heading, Math.min(1, dt * 2));
+    h.group.position.copy(h.pos);
+    h.group.rotation.y = h.heading;
+    h.light.position.copy(h.pos);
+    h.light.target.position.set(p.x, 0, p.z);
+    h.light.target.updateMatrixWorld();
+    h.pool.position.set(p.x, 0.12, p.z);
+  }
+
   // -- Per-frame -----------------------------------------------------------
   update(w, dt) {
     if (w.wanted <= 0) {
       if ((w.policeCars && w.policeCars.length)
         || (w.officers && w.officers.length)
-        || this._roadblocks.length) {
+        || this._roadblocks.length
+        || this._heli) {
         this.clearUnits(w);
       }
       return;
@@ -492,6 +646,7 @@ export class Police {
       if (w.mode !== 'playing') return; // busted mid-tick: stop here
     }
     this.updateRoadblocks(w, dt);
+    this.updateHeli(w, dt);
     this.coolDown(w, dt);
   }
 }

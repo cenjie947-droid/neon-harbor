@@ -123,10 +123,9 @@ car damage with smoke and disable, varied pedestrians, the taxi side
 job, saves that restore the mission, the beat inside it and the car
 being driven, camera keep-out, steal reach measured to the oriented
 body box out to ~5 m, minimap arrow PI − heading on a north-up map,
-heat lasting a full minute genuinely unseen, an unmistakable punch
-(arc, whoosh, on-screen line on a miss, spark burst and "Punch
-landed!" on a connect), and a mission-complete card whose reward and
-total are read from the same ledger at the same moment ($300 / $450).
+heat lasting a full minute genuinely unseen, an unmistakable punch,
+and a mission-complete card whose reward and total are read from the
+same ledger at the same moment ($300 / $450).
 Combat was rebuilt with gunmen who close in, plant themselves and
 fire in bursts, and sometimes drop a pistol pickup; the HUD was
 rebuilt with the live minimap, damage flash, feed and drive readouts;
@@ -135,6 +134,46 @@ the car by name at a collision-clear spot; the screenshot stager
 poses the real running game for all four shots; and the entrypoint
 now starts from a clean output folder and copies exactly the four
 named screenshots.
+
+## What this round fixed (v11, 2026-11-22)
+
+The v10 round rewrote the whole codebase fresh again in recorded
+sessions that started after recording began — every file including
+the small files the last entry missed (.gitignore, LICENSE, README.md,
+game/index.html, game/style.css, serve.ts), each authored from its
+behavioural spec: state, city, vehicles, player, pedestrians, audio,
+effects, main, missions, police, combat, hud, save, shots, main.ts,
+and STRATEGY.md itself.
+
+On top of the rewrite, two new systems landed:
+
+- **Street-race side job (free roam).** A checkered start line on the
+  harbor straight (checkered marker on the minimap). Drive a car onto
+  the pad and press G: a 3-2-1 countdown, then 3 checkpoint gates
+  across downtown within 90 seconds. The HUD shows the gate counter
+  and the seconds left; finishing pays $100 + $10 per second left,
+  capped at $200, through the same cash ledger as the other jobs.
+  Free roam only — while a story mission is active the pad shows no
+  hint and G does nothing. Leaving the car, getting busted or wasted
+  cancels the race; it is repeatable immediately.
+- **Police helicopter at 4+ stars.** One heli built from boxes with a
+  spinning rotor follows Cole at ~40 m with a searchlight tracking him
+  on the ground. While it is overhead wanted decay pauses — it can
+  see him — and it flies up and away once the heat drops below 3
+  stars. It shows on the minimap as a red dot with a ring.
+
+The rewrite also carried over every fix from the v4 and v10 rounds:
+Pay N Spray, car damage with smoke and disable, varied pedestrians,
+the taxi and courier side jobs, saves that restore the mission, the
+beat inside it and the car being driven, camera keep-out, steal reach
+measured to the oriented body box out to ~5 m, minimap arrow PI −
+heading on a north-up map, heat lasting a full minute genuinely
+unseen, an unmistakable punch, roadblocks at 3+ stars, and a
+mission-complete card whose reward and total are read from the same
+ledger at the same moment ($300 / $450). The HUD also gained the
+`setInteract` prompt main.js already called every frame, a race
+status line, and a checkered race-pad marker; the title screen lists
+the G (street race) and C (courier job) keys.
 
 ## What to improve next
 

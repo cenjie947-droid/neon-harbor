@@ -40,6 +40,21 @@ diamond over their head is waiting for a ride. Walk up and press **T** to pick t
 up, follow the beacon to their destination, and collect a $40–$80 fare. Fares keep
 coming, so it is a repeatable way to earn cash between jobs.
 
+## Street race and the police helicopter
+
+Free roam has a repeatable **street race**: a checkered start line is painted on
+the harbor straight (checkered marker on the minimap). Drive a car onto the pad and
+press **G** — after a 3-2-1 countdown, thread 3 checkpoint gates across downtown
+within 90 seconds. The HUD shows the gate counter and the time left; finishing pays
+$100 plus $10 for every second left, capped at $200. Leaving the car, getting busted
+or wasted cancels the race. The race only runs in free roam — while a story mission
+is active the pad stays quiet and G does nothing.
+
+Push the heat to 4 stars or more and the Harbor PD sends up a **police helicopter**:
+it hangs above Cole at about 40 m with a spinning rotor and a searchlight tracking
+him on the ground. While it is overhead the wanted level stops decaying — it can
+see him — and it only leaves once the heat drops below 3 stars.
+
 ## How to play
 
 | Key | Action |
@@ -54,6 +69,8 @@ coming, so it is a repeatable way to earn cash between jobs.
 | R | Flip a car upright |
 | F | Pay N Spray (drive onto the pad first) |
 | T | Pick up a taxi fare (free roam) |
+| G | Start street race (on the start pad, free roam) |
+| C | Courier job (free roam) |
 | P / Esc | Pause |
 | M | Mute |
 

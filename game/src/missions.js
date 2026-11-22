@@ -1,17 +1,24 @@
 // Neon Harbor — missions.js
 //
-// Five story jobs in order, plus the two free-roam side jobs (taxi fares
-// and courier parcels) and the Pay N Spray marker key. The story never
-// blocks the side jobs and the side jobs never block the story: side jobs
-// only run while no story job is active, and being busted or wasted
-// cancels them cleanly.
+// Five story jobs in order, plus three free-roam side jobs (taxi fares,
+// courier parcels, and the street race) and the Pay N Spray marker key.
+// The story never blocks the side jobs and the side jobs never block
+// the story: side jobs only run while no story job is active, and
+// being busted or wasted cancels them cleanly.
 //
-// Every step is a small object: the line the HUD shows, the map marker
-// the beacon points at, an optional countdown, an optional on-enter
-// hook, and a check that runs every tick. A job pays out the moment its
-// last step checks true; the reward and the new cash total are read from
-// the same ledger at the same moment, so the mission-complete card can
-// never disagree with the cash on the HUD.
+// Every story step is a small object: the line the HUD shows, the map
+// marker the beacon points at, an optional countdown, an optional
+// on-enter hook, and a check that runs every tick. A job pays out the
+// moment its last step checks true; the reward and the new cash total
+// are read from the same ledger at the same moment, so the
+// mission-complete card can never disagree with the cash on the HUD.
+//
+// Street race (new in v11): a repeatable free-roam race from a
+// checkered start line on the harbor straight (z = 120, x = -120),
+// three gates across downtown, 90 seconds, $100 + $10 per second
+// left, capped at $200. Same pattern as taxi/courier: beacon + timer
+// + payout through the same cash ledger, never blocks the story,
+// busted/wasted or leaving the car cancels it cleanly.
 import * as THREE from 'three';
 import { dist2D, randInt, pick } from './state.js';
 import { markTaxiClient, unmarkTaxiClient } from './pedestrians.js';
@@ -25,6 +32,21 @@ const COURIER_TIME = 90; // seconds to run a parcel
 const COURIER_PAY_MIN = 60;
 const COURIER_PAY_MAX = 120;
 const COURIER_PICKUP = 5;
+
+// Street race tuning.
+const RACE_TIME = 90;        // seconds to clear all three gates
+const RACE_PAY_BASE = 100;   // flat part of the payout
+const RACE_PAY_PER_SEC = 10; // bonus per second left on the clock
+const RACE_PAY_CAP = 200;
+const RACE_PAD_RADIUS = 8;   // metres from the start line to join
+const RACE_GATE_RADIUS = 10; // metres to clear a gate
+// The harbor straight: the z = 120 east-west road by the docks.
+const RACE_START = { x: -120, z: 120 };
+const RACE_GATES = [
+  { x: 0, z: 120, turn: Math.PI / 2 },   // east along the harbor straight
+  { x: 120, z: 120, turn: Math.PI / 2 }, // keep east to the far end
+  { x: 120, z: -60, turn: 0 },           // north up the x = 120 road
+];
 
 // Markers a side-job destination may point at.
 const FARE_MARKERS = [
@@ -143,6 +165,8 @@ export class Missions {
     this._ambushSpawned = false;
     this._taxiCooldown = 4;     // seconds until the first taxi offer
     this._dispatcher = null;    // courier dispatcher figure at the docks
+    this._racePad = null;       // checkered start line + flag at the harbor straight
+    this._raceRings = [];       // one torus per gate, shown while racing
   }
 
   // The job being played, or the one just completed (for the card text).
@@ -165,19 +189,35 @@ export class Missions {
     try { w.hud.showMessage(msg); } catch (err) { /* hud optional */ }
   }
 
+  hint(w, msg, seconds = 1) {
+    try { w.hud.showHint(msg, seconds); } catch (err) { /* hud optional */ }
+  }
+
   objective(w, text) {
     try { w.hud.setObjective(text); } catch (err) { /* hud optional */ }
   }
 
-  setBeacon(w, key) {
-    if (!key || !w.markers[key]) {
+  // Point the beacon at a named marker, or at a raw { x, z } point
+  // (the race gates are not named markers). Null clears it.
+  setBeacon(w, target) {
+    if (!target) {
       w.beacon = null;
       w.beaconTarget = null;
       return;
     }
-    const m = w.markers[key];
-    w.beaconTarget = m;
-    w.beacon = { x: m.x, z: m.z };
+    if (typeof target === 'string') {
+      const m = w.markers[target];
+      if (!m) {
+        w.beacon = null;
+        w.beaconTarget = null;
+        return;
+      }
+      w.beaconTarget = m;
+      w.beacon = { x: m.x, z: m.z };
+      return;
+    }
+    w.beaconTarget = target;
+    w.beacon = { x: target.x, z: target.z };
   }
 
   // -- Story flow ---------------------------------------------------------
@@ -264,6 +304,7 @@ export class Missions {
     if (!w.missionActive) {
       this.updateTaxi(w, dt);
       this.updateCourier(w, dt);
+      this.updateRace(w, dt);
       return;
     }
     const j = this.jobs[w.missionIndex];
@@ -303,7 +344,7 @@ export class Missions {
     w.freeRoam = true;
     this.setBeacon(w, null);
     try { w.hud.setMissionName('FREE ROAM'); } catch (err) { /* hud */ }
-    this.objective(w, 'Free roam — press T for a taxi fare, C for a courier parcel.');
+    this.objective(w, 'Free roam — T taxi fare, C courier parcel, G street race.');
   }
 
   cancelSideJobs(w) {
@@ -326,6 +367,8 @@ export class Missions {
       w.courier.timer = 0;
       w.courier.client = null;
     }
+    // Race: the run is over, whatever the result was.
+    this.cancelRace(w, true);
     this._taxiCooldown = 6;
     this.setBeacon(w, null);
     // A timed story step restarts its countdown after a respawn.
@@ -407,6 +450,10 @@ export class Missions {
   taxiAction(w) {
     const t = w.taxi;
     if (!t || t.phase !== 'wait' || !t.client) return;
+    if (w.race && (w.race.phase === 'countdown' || w.race.phase === 'run')) {
+      this.say(w, 'Finish the race first — one job at a time.');
+      return;
+    }
     if (!w.player.car) {
       this.say(w, 'You need a car to pick up a fare.');
       return;
@@ -509,6 +556,10 @@ export class Missions {
     const c = w.courier;
     if (!c) return;
     if (w.missionActive) return; // never blocks a story job
+    if (w.race && (w.race.phase === 'countdown' || w.race.phase === 'run')) {
+      this.say(w, 'Finish the race first — one job at a time.');
+      return;
+    }
     if (c.phase === 'deliver') {
       this.say(w, 'Already carrying a parcel — follow the beacon.');
       return;
@@ -539,5 +590,227 @@ export class Missions {
     this.setBeacon(w, destKey);
     this.objective(w, `Courier parcel $${c.pay} — deliver to ${destKey} in ${COURIER_TIME}s.`);
     this.say(w, `Parcel taken — $${c.pay} if it reaches ${destKey} in ${COURIER_TIME} seconds.`);
+  }
+
+  // -- Street race side job -----------------------------------------------
+  // A checkered start line painted on the harbor straight (z = 120,
+  // x = -120). Drive onto it, press G, beat the 3-2-1, then clear
+  // three gates across downtown inside 90 seconds. Payout $100 +
+  // $10 per second left, capped at $200, through the same cash ledger
+  // as every other job. Only in free roam; leaving the car, getting
+  // busted or wasted cancels the run.
+  racePad(w) {
+    if (this._racePad) return this._racePad;
+    if (!w.scene) return null;
+    const group = new THREE.Group();
+    // Checkered strip across the road: 10 squares, 1 m each, lying
+    // flat on the asphalt, running north-south across the z = 120 road.
+    for (let i = 0; i < 10; i++) {
+      const dark = (i % 2) === 0;
+      const tile = new THREE.Mesh(
+        new THREE.BoxGeometry(1, 0.08, 1.1),
+        new THREE.MeshStandardMaterial({ color: dark ? 0x111111 : 0xf5f5f5 }),
+      );
+      tile.position.set(RACE_START.x, 0.05, RACE_START.z - 5 + i + 0.5);
+      group.add(tile);
+    }
+    // A spinning checkered flag marker above the line so the pad reads
+    // from a distance, like the taxi diamond and the courier diamond.
+    const flag = new THREE.Mesh(
+      new THREE.OctahedronGeometry(0.7),
+      new THREE.MeshBasicMaterial({ color: 0xffffff }),
+    );
+    flag.position.set(RACE_START.x, 3.2, RACE_START.z);
+    group.add(flag);
+    const pole = new THREE.Mesh(
+      new THREE.BoxGeometry(0.12, 3.2, 0.12),
+      new THREE.MeshStandardMaterial({ color: 0x222222 }),
+    );
+    pole.position.set(RACE_START.x + 5.4, 1.6, RACE_START.z - 5.4);
+    group.add(pole);
+    w.scene.add(group);
+    this._racePad = { group, flag };
+    return this._racePad;
+  }
+
+  raceRings(w) {
+    if (this._raceRings.length) return this._raceRings;
+    if (!w.scene) return [];
+    const rings = [];
+    for (const gate of RACE_GATES) {
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(4.2, 0.28, 10, 28),
+        new THREE.MeshBasicMaterial({ color: 0xffd23a }),
+      );
+      ring.position.set(gate.x, 4.4, gate.z);
+      ring.rotation.y = gate.turn;
+      ring.visible = false;
+      w.scene.add(ring);
+      rings.push(ring);
+    }
+    this._raceRings = rings;
+    return rings;
+  }
+
+  // Put the minimap's pulsing objective diamond on the race pad while
+  // idle (so the start line is findable), on the next gate while
+  // racing. Never fight the taxi/courier beacons: only when neither
+  // of those jobs is mid-run.
+  raceMapMarker(w) {
+    const r = w.race;
+    if (!r) return;
+    const taxiBusy = w.taxi && w.taxi.phase === 'ride';
+    const courierBusy = w.courier && w.courier.phase === 'deliver';
+    if (taxiBusy || courierBusy) {
+      // A live fare owns the minimap diamond: drop the race marker
+      // instead of leaving it stale on the pad.
+      this.clearRaceMapMarker(w);
+      return;
+    }
+    if (r.phase === 'run' || r.phase === 'countdown') {
+      w.objectiveTarget = RACE_GATES[Math.min(r.gate, RACE_GATES.length - 1)];
+    } else {
+      w.objectiveTarget = RACE_START;
+    }
+  }
+
+  clearRaceMapMarker(w) {
+    if (w.objectiveTarget === RACE_START
+      || RACE_GATES.includes(w.objectiveTarget)) {
+      w.objectiveTarget = null;
+    }
+  }
+
+  raceAction(w) {
+    const r = w.race;
+    if (!r) return;
+    if (w.missionActive) return; // never during a story job: no hint, no start
+    if (r.phase === 'countdown' || r.phase === 'run') {
+      this.say(w, 'Race already running — follow the beacon.');
+      return;
+    }
+    if (!w.player.car) {
+      this.say(w, 'You need to be in a car to race — drive onto the start line.');
+      return;
+    }
+    if (w.taxi && w.taxi.phase === 'ride') {
+      this.say(w, 'Drop the fare off first — one job at a time.');
+      return;
+    }
+    if (w.courier && w.courier.phase === 'deliver') {
+      this.say(w, 'Deliver the parcel first — one job at a time.');
+      return;
+    }
+    const p = w.player.pos;
+    if (dist2D(p.x, p.z, RACE_START.x, RACE_START.z) > RACE_PAD_RADIUS) {
+      this.say(w, 'Find the checkered start line on the harbor road — look for the white flag.');
+      return;
+    }
+    r.phase = 'countdown';
+    r.countdown = 3.2;
+    r.gate = 0;
+    r.timer = RACE_TIME;
+    r.pay = 0;
+    const rings = this.raceRings(w);
+    if (rings[0]) rings[0].visible = true;
+    this.setBeacon(w, RACE_GATES[0]);
+    this.objective(w, 'Street Race — get ready… 3');
+    this.say(w, 'Race started — 3 gates, 90 seconds');
+  }
+
+  cancelRace(w, silent = false) {
+    const r = w.race;
+    if (!r) return;
+    if (r.phase === 'none') return;
+    r.phase = 'none';
+    r.gate = 0;
+    r.timer = 0;
+    r.pay = 0;
+    r.countdown = 0;
+    for (const ring of this._raceRings) ring.visible = false;
+    this.clearRaceMapMarker(w);
+    if (w.missionActive) return; // a story job owns the beacon now
+    this.setBeacon(w, null);
+    if (!silent) this.say(w, 'Race cancelled.');
+  }
+
+  updateRace(w, dt) {
+    const r = w.race;
+    if (!r) return;
+    this.racePad(w);
+    this.raceRings(w);
+    const pad = this._racePad;
+    if (pad) {
+      pad.flag.rotation.y += dt * 2;
+      pad.flag.position.y = 3.2 + Math.sin(w.time * 2) * 0.2;
+    }
+    // Keep the minimap diamond on the pad while idle, on the next
+    // gate while racing, and off the pad while a fare is running.
+    this.raceMapMarker(w);
+    if (r.phase === 'none') {
+      // Idle: hint at the start line when Cole sits in a car on it.
+      if (w.player.car && !w.missionActive) {
+        const p = w.player.pos;
+        if (dist2D(p.x, p.z, RACE_START.x, RACE_START.z) <= RACE_PAD_RADIUS) {
+          this.hint(w, 'Press G — Street Race ($100–$200)', 0.6);
+        }
+      }
+      return;
+    }
+    // Leaving the car mid-race ends the run, same as a taxi fare.
+    if (!w.player.car) {
+      this.cancelRace(w);
+      this.say(w, 'Race cancelled — you left the car.');
+      return;
+    }
+    if (r.phase === 'countdown') {
+      r.countdown -= dt;
+      const shown = Math.max(1, Math.ceil(r.countdown));
+      this.objective(w, `Street Race — get ready… ${shown}`);
+      if (r.countdown <= 0) {
+        r.phase = 'run';
+        // Line the car up on the start line facing the first gate, the
+        // way a real race does: without this a driver who rolled onto
+        // the pad from the east starts facing the wrong way and must
+        // U-turn on the line while the cruiser sits on the bumper.
+        const car = w.player.car;
+        if (car) {
+          car.heading = RACE_GATES[0].turn ?? Math.atan2(RACE_GATES[0].x - car.pos.x, RACE_GATES[0].z - car.pos.z);
+        }
+        this.objective(w, `Street Race — Gate 1/3 — ${Math.ceil(r.timer)}s`);
+        this.say(w, 'GO! Gate 1/3');
+      }
+      return;
+    }
+    // Running: countdown, gate checks, payout on the last gate.
+    r.timer -= dt;
+    if (r.timer <= 0) {
+      this.cancelRace(w, true);
+      this.say(w, 'Race failed — out of time.');
+      this.objective(w, 'Free roam — T taxi fare, C courier parcel, G street race.');
+      return;
+    }
+    const gate = RACE_GATES[r.gate];
+    const p = w.player.pos;
+    this.objective(w, `Street Race — Gate ${r.gate + 1}/3 — ${Math.max(0, Math.ceil(r.timer))}s`);
+    if (!gate || dist2D(p.x, p.z, gate.x, gate.z) > RACE_GATE_RADIUS) return;
+    const rings = this._raceRings;
+    if (rings[r.gate]) rings[r.gate].visible = false;
+    r.gate += 1;
+    try { w.audio.chime(); } catch (err) { /* best-effort */ }
+    if (r.gate >= RACE_GATES.length) {
+      const left = Math.max(0, Math.ceil(r.timer));
+      const pay = Math.min(RACE_PAY_CAP, RACE_PAY_BASE + RACE_PAY_PER_SEC * left);
+      w.cash += pay;
+      r.pay = pay;
+      try { w.audio.cash(); } catch (err) { /* best-effort */ }
+      this.say(w, `Race complete — $${pay}.`);
+      this.cancelRace(w, true);
+      this.objective(w, 'Free roam — T taxi fare, C courier parcel, G street race.');
+      return;
+    }
+    if (rings[r.gate]) rings[r.gate].visible = true;
+    this.setBeacon(w, RACE_GATES[r.gate]);
+    this.say(w, `Gate ${r.gate}/3`);
   }
 }

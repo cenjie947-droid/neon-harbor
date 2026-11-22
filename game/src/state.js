@@ -1,12 +1,15 @@
-// Neon Harbor — shared world state and geometry helpers.
-// One place owns the numbers every module reads: the world size, the road
-// grid, the live game object, and the small math routines used for
-// collision, steering and distance checks.
+// Neon Harbor — shared state: world constants, the live game object,
+// and the geometry helpers every other module leans on.
+//
+// This file owns the numbers, not the behaviour. The city size, the road
+// grid, the shape of the central game object and the collision routines
+// all live here so the rest of the codebase reads them from one place
+// instead of each module inventing its own copy.
 
 import * as THREE from 'three';
 
-// World dimensions, in metres. The playable city is a square; the beach
-// and sea sit on its southern edge.
+// The playable square is 480 m across; the beach and the sea sit along
+// its southern edge, past z = 198.
 export const WORLD = {
   half: 240,
   roadWidth: 10,
@@ -17,19 +20,18 @@ export const WORLD = {
   gridMax: 180,
 };
 
-// Road centre-lines. The city is a regular grid, so the X roads and the Z
-// roads share the same line positions.
+// Road centre-lines, shared by the X roads and the Z roads alike.
 const GRID_LINES = [];
 for (let v = WORLD.gridMin; v <= WORLD.gridMax; v += WORLD.gridStep) {
   GRID_LINES.push(v);
 }
 
-// Build a fresh game object. Main fills in the three.js pieces (scene,
-// camera, renderer, sun, sea, ferris) and the subsystem handles
-// (player, hud, audio, fx, police, combat, missions, save) once they
-// exist; until then they stay null so nothing reads a half-built system.
+// A brand-new game object. Main attaches the three.js handles (scene,
+// camera, renderer, sun, sea, ferris) and the subsystem handles (player,
+// hud, audio, fx, police, combat, missions, save) once those exist;
+// until then they stay null so nothing reads a half-built system.
 export function makeGame() {
-  const g = {
+  return {
     // Run state.
     mode: 'title',
     time: 0,
@@ -94,13 +96,14 @@ export function makeGame() {
     renderEnabled: true,
     _render: true,
   };
-  return g;
 }
 
-// --- small math helpers -------------------------------------------------
+// --- small maths ----------------------------------------------------------
 
 export function clamp(v, lo, hi) {
-  return v < lo ? lo : v > hi ? hi : v;
+  if (v < lo) return lo;
+  if (v > hi) return hi;
+  return v;
 }
 
 export function rand(lo, hi) {
@@ -108,18 +111,20 @@ export function rand(lo, hi) {
 }
 
 export function randInt(lo, hi) {
-  return Math.floor(rand(lo, hi + 1));
+  return Math.floor(lo + Math.random() * (hi - lo + 1));
 }
 
 export function pick(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
+  return arr[(Math.random() * arr.length) | 0];
 }
 
 export function dist2D(x1, z1, x2, z2) {
-  return Math.hypot(x2 - x1, z2 - z1);
+  const dx = x2 - x1;
+  const dz = z2 - z1;
+  return Math.sqrt(dx * dx + dz * dz);
 }
 
-// Shortest-arc interpolation between two headings.
+// Interpolate between two headings along the shortest arc.
 export function angleLerp(a, b, t) {
   let d = b - a;
   while (d > Math.PI) d -= Math.PI * 2;
@@ -136,11 +141,11 @@ export function vec3(x, y, z) {
   return new THREE.Vector3(x, y, z);
 }
 
-// --- collision ----------------------------------------------------------
+// --- collision ------------------------------------------------------------
 
-// Resolve a circle (centre x,z, radius r) against every box collider.
-// Returns { hit, x, z }: hit is true when any collider pushed the circle,
-// and x/z are the resolved centre — slid out of the box along the axis of
+// Push a circle (centre x,z, radius r) out of every box collider.
+// Returns { hit, x, z }: hit is true when any collider moved the
+// circle, and x/z are the resolved centre — slid out along the axis of
 // smallest penetration. Callers test .hit and use .x/.z as the new
 // position; the return is a resolved position, never a plain boolean.
 export function collideCircle(game, x, z, r) {
@@ -152,56 +157,54 @@ export function collideCircle(game, x, z, r) {
     const hd = c.hd || 0;
     const dx = px - c.x;
     const dz = pz - c.z;
-    const ox = hw + r - Math.abs(dx);
-    const oz = hd + r - Math.abs(dz);
-    if (ox <= 0 || oz <= 0) continue;
+    const overX = hw + r - Math.abs(dx);
+    const overZ = hd + r - Math.abs(dz);
+    if (overX <= 0 || overZ <= 0) continue;
     hit = true;
-    if (ox < oz) {
+    if (overX < overZ) {
       px = c.x + (dx >= 0 ? hw + r : -(hw + r));
     } else {
       pz = c.z + (dz >= 0 ? hd + r : -(hd + r));
     }
   }
-  // Keep the circle inside the playable square too.
-  const h = WORLD.half - r;
-  if (px < -h) { px = -h; hit = true; }
-  if (px > h) { px = h; hit = true; }
-  if (pz < -h) { pz = -h; hit = true; }
-  if (pz > h) { pz = h; hit = true; }
+  // The playable square bounds the circle as well.
+  const lim = WORLD.half - r;
+  if (px < -lim) { px = -lim; hit = true; }
+  if (px > lim) { px = lim; hit = true; }
+  if (pz < -lim) { pz = -lim; hit = true; }
+  if (pz > lim) { pz = lim; hit = true; }
   return { hit, x: px, z: pz };
 }
 
 // True when the straight segment from (x1,z1) to (x2,z2) crosses any
 // box collider (with a small clearance margin), used for police and
-// pedestrian line-of-sight checks.
+// pedestrian line-of-sight checks. Slab test per axis.
 export function segmentBlocked(game, x1, z1, x2, z2) {
   const dx = x2 - x1;
   const dz = z2 - z1;
   for (const c of game.colliders) {
     const hw = (c.hw || 0) + 0.5;
     const hd = (c.hd || 0) + 0.5;
-    // Slab test against the box.
     let tmin = 0;
     let tmax = 1;
-    let ok = true;
+    let clear = true;
     const axes = [
       { d: dx, p: x1 - c.x, half: hw },
       { d: dz, p: z1 - c.z, half: hd },
     ];
     for (const ax of axes) {
       if (Math.abs(ax.d) < 1e-9) {
-        if (Math.abs(ax.p) > ax.half) { ok = false; break; }
+        if (Math.abs(ax.p) > ax.half) { clear = false; break; }
       } else {
         let t0 = (-ax.half - ax.p) / ax.d;
         let t1 = (ax.half - ax.p) / ax.d;
         if (t0 > t1) { const tmp = t0; t0 = t1; t1 = tmp; }
-        if (tmin > tmax) { ok = false; break; }
         if (t0 > tmin) tmin = t0;
         if (t1 < tmax) tmax = t1;
-        if (tmin > tmax) { ok = false; break; }
+        if (tmin > tmax) { clear = false; break; }
       }
     }
-    if (ok && tmin <= tmax && tmax >= 0 && tmin <= 1) return true;
+    if (clear && tmax >= 0 && tmin <= 1) return true;
   }
   return false;
 }

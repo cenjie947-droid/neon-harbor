@@ -9,7 +9,7 @@
 //
 // A pedestrian is a plain object: pos, state, target, marker, heading,
 // speed, waitTimer, phase, fleeTimer, scale, mesh, line, fleeX, fleeZ,
-// axis, legR, legL, hat.
+// axis, legR, legL, hat, shirt, trousers, skin.
 
 import * as THREE from 'three';
 import { clamp, rand, pick, collideCircle } from './state.js';
@@ -95,7 +95,9 @@ function buildPedMesh(ped) {
 // Create one walker at a sidewalk spot. `shared` lets a group of walkers
 // share one destination and one walking line.
 function makePed(game, shared = null) {
-  const spot = shared ? { x: shared.x + rand(-1.5, 1.5), z: shared.z + rand(-1.5, 1.5) } : sidewalkSpot(game);
+  const spot = shared
+    ? { x: shared.x + rand(-1.5, 1.5), z: shared.z + rand(-1.5, 1.5) }
+    : sidewalkSpot(game);
   const axis = shared ? shared.axis : (Math.random() < 0.5 ? 'x' : 'z');
   const line = shared ? shared.line : (axis === 'x' ? spot.z : spot.x);
   const ped = {
@@ -163,8 +165,8 @@ export function updatePedestrians(game, dt) {
   for (const ped of game.peds) {
     if (ped.state === 'dead') continue;
 
-    // Fleeing: run away from the scare point until the timer runs out.
     if (ped.state === 'flee') {
+      // Fleeing: run away from the scare point until the timer runs out.
       ped.fleeTimer -= dt;
       const dx = ped.pos.x - ped.fleeX;
       const dz = ped.pos.z - ped.fleeZ;

@@ -6,11 +6,17 @@
 // mission cash, and then the normal frame loop draws the frame the
 // camera captures. The mission card's own numbers are written by
 // main.js from the same cash ledger, so the card and the staged cash
-// can never disagree.
+// can never disagree: mission 2 pays $300 on top of mission 1's $150,
+// total cash $450.
 import { enterCar } from './vehicles.js';
 
+const SCREEN_IDS = [
+  'title-screen', 'briefing', 'pause-menu',
+  'busted-screen', 'wasted-screen', 'ending-screen',
+];
+
 function hideScreens() {
-  for (const id of ['title-screen', 'briefing', 'pause-menu', 'busted-screen', 'wasted-screen', 'ending-screen']) {
+  for (const id of SCREEN_IDS) {
     document.getElementById(id)?.classList.add('hidden');
   }
 }
@@ -33,7 +39,7 @@ function nearestParkedCar(g, x, z) {
 // down the nearest road, rolling at a gentle cruise so the shot has
 // motion in it. Falls back to a direct assignment if the vehicles
 // module's enter helper refuses the car.
-function putColeInCar(g, x, z, speed = 11) {
+function seatCole(g, x, z, speed = 11) {
   const car = nearestParkedCar(g, x, z);
   if (!car) return null;
   const hero = g.player;
@@ -61,7 +67,7 @@ function putColeInCar(g, x, z, speed = 11) {
   return car;
 }
 
-function startPlaying(g) {
+function beginPlay(g) {
   g.mode = 'playing';
   hideScreens();
   g.hud?.show?.();
@@ -76,20 +82,20 @@ function stageTitle(g) {
 }
 
 function stageDrive(g) {
-  startPlaying(g);
+  beginPlay(g);
   const m = g.markers ?? {};
   const spot = m.showroom ?? m.garage ?? { x: 0, z: 0 };
-  putColeInCar(g, spot.x, spot.z, 11);
+  seatCole(g, spot.x, spot.z, 11);
   g.hud?.setMissionName?.('Free Roam');
   g.hud?.setObjective?.('Cruise Neon Harbor — the city is yours.');
   g.hud?.renderDrive?.(g.player);
 }
 
 function stageChase(g) {
-  startPlaying(g);
+  beginPlay(g);
   const m = g.markers ?? {};
   const spot = m.bank ?? { x: 0, z: 0 };
-  putColeInCar(g, spot.x, spot.z, 13);
+  seatCole(g, spot.x, spot.z, 13);
   // Three stars: cruisers spawn around Cole and close in while the
   // driver steps the world, so the shot catches the pursuit mid-chase.
   g.police?.addWanted?.(g, 3, 'shot');
@@ -101,7 +107,7 @@ function stageChase(g) {
 }
 
 function stageMission(g) {
-  startPlaying(g);
+  beginPlay(g);
   // Mission 2, The Pickup, is done: $300 on top of mission 1's $150.
   // The cash ledger is the single source for the card's total.
   g.cash = 450;
@@ -109,7 +115,7 @@ function stageMission(g) {
   g.missionStep = 0;
   const m = g.markers ?? {};
   const spot = m.garage ?? { x: 0, z: 0 };
-  putColeInCar(g, spot.x, spot.z, 0);
+  seatCole(g, spot.x, spot.z, 0);
   const car = g.player.car;
   if (car) {
     car.speed = 0;
